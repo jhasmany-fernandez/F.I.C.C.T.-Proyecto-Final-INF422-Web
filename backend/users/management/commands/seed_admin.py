@@ -1,24 +1,40 @@
+import math
 from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.utils import timezone
 
 from users.models import (
     Child,
     ChildStatus,
+    ChildTutorAssociation,
+    ChildTutorAssociationAction,
     EducationalCenter,
     GPSDevice,
+    MonitoringConfig,
     MobileAccountStatus,
     Module,
     ModuleCode,
     Permission,
     PermissionAction,
+    RiskZone,
+    RiskZoneSeverity,
+    RiskZoneType,
     Role,
     RolePermission,
+    SafeArea,
+    SafeAreaHistory,
+    SafeAreaHistoryAction,
+    SafeAreaStatus,
     Tutor,
     TutorStatus,
     UserRole,
+    create_child_tutor_history,
+    refresh_child_tutor_reference,
+    sync_tutor_children_mirror,
 )
 
 User = get_user_model()
@@ -54,9 +70,11 @@ BASE_ROLES = [
 ]
 
 EDUCATIONAL_CENTERS = [
-    ("CE-001", "Centro Educativo San Martín"),
-    ("CE-002", "Unidad Educativa Libertad"),
-    ("CE-003", "Colegio Horizonte"),
+    ("CE-001", "Centro Educativo San Martín", "Av. Principal #123", "70000001", "sanmartin@centro.com", "Mañana", "Centro activo con monitoreo.", True, "regente1@colegio.com"),
+    ("CE-002", "Colegio Nacional Florida", "Calle Florida #456", "70000002", "florida@centro.com", "Tarde", "Centro con alta demanda escolar.", True, "regente2@colegio.com"),
+    ("CE-003", "Unidad Educativa La Salle", "Av. La Salle #789", "70000003", "lasalle@centro.com", "Mañana", "Centro de referencia académica.", True, "regente3@colegio.com"),
+    ("CE-004", "Centro Educativo Los Pinos", "Zona Norte #321", "70000004", "lospinos@centro.com", "Tarde", "Centro temporalmente inactivo.", False, ""),
+    ("CE-005", "Colegio Técnico Santa Cruz", "Doble Vía La Guardia #654", "70000005", "tecnico@centro.com", "Noche", "Centro técnico sin regente asignado.", True, ""),
 ]
 
 GPS_DEVICES = [
@@ -77,16 +95,114 @@ CHILDREN = [
     ("Mateo", "Suárez Rocha", date(2015, 12, 1), "6to Primaria", "CE-003", "GPS-004", ChildStatus.INACTIVO, "Mantenimiento preventivo del servicio."),
     ("Valentina", "Paredes Arias", date(2017, 5, 30), "4to Primaria", "CE-001", "GPS-005", ChildStatus.ACTIVO, ""),
     ("Thiago", "Quispe Molina", date(2014, 9, 14), "1ro Secundaria", "CE-002", None, ChildStatus.INACTIVO, "Solicitud administrativa."),
+    ("Lucas", "Mendoza Pardo", date(2016, 1, 11), "5to Primaria", "CE-003", "GPS-006", ChildStatus.ACTIVO, ""),
 ]
 
 TUTORS = [
-    ("María", "López García", "maria.lopez@gmail.com", "987 654 321", "Av. Siempre Viva 123", "Madre", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "maria.lopez@gmail.com", [1, 2]),
+    ("María", "López García", "maria.lopez@gmail.com", "987 654 321", "Av. Siempre Viva 123", "Madre", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "maria.lopez@gmail.com", [2]),
     ("Carlos", "Pérez Ramírez", "carlos.perez@gmail.com", "789 456 123", "Calle Bolívar 456", "Padre", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "carlos.perez@gmail.com", [2]),
     ("Ana", "Torres Díaz", "ana.torres@gmail.com", "765 222 111", "Zona Norte 12", "Abuela", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "ana.torres@gmail.com", [3]),
-    ("Laura", "Gómez Salazar", "laura.gomez@gmail.com", "700 111 999", "Barrio Central 55", "Tía", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "laura.gomez@gmail.com", [1, 4, 7]),
+    ("Laura", "Gómez Salazar", "laura.gomez@gmail.com", "700 111 999", "Barrio Central 55", "Tía", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "laura.gomez@gmail.com", [4, 7]),
     ("José", "Martínez Vargas", "jose.martinez@gmail.com", "733 888 000", "Av. Integración 80", "Padre", TutorStatus.INACTIVO, MobileAccountStatus.INACTIVA, "jose.martinez@gmail.com", [5]),
-    ("Patricia", "Herrera Castillo", "patricia.herrera@gmail.com", "744 333 222", "Zona Sur 9", "Madre", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "patricia.herrera@gmail.com", [6, 8]),
+    ("Patricia", "Herrera Castillo", "patricia.herrera@gmail.com", "744 333 222", "Zona Sur 9", "Madre", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "patricia.herrera@gmail.com", [6, 8, 9]),
     ("Miguel", "Sánchez Rojas", "miguel.sanchez@gmail.com", "711 222 444", "Villa Esperanza 21", "Tutor Legal", TutorStatus.ACTIVO, MobileAccountStatus.SIN_CUENTA, "", [3]),
+]
+
+SAFE_AREAS = [
+    (
+        "CE-001",
+        "Área Segura Principal San Martín",
+        {
+            "type": "Polygon",
+            "coordinates": [[
+                [-84.090125, 9.928240],
+                [-84.089654, 9.928312],
+                [-84.089432, 9.928102],
+                [-84.089654, 9.927765],
+                [-84.089998, 9.927732],
+                [-84.090210, 9.927910],
+                [-84.090310, 9.928150],
+                [-84.090125, 9.928240],
+            ]],
+        },
+        "2856.45",
+        "214.78",
+        7,
+    ),
+    (
+        "CE-002",
+        "Área Segura Florida",
+        {
+            "type": "Polygon",
+            "coordinates": [[
+                [-63.182100, -17.783300],
+                [-63.181600, -17.783100],
+                [-63.181100, -17.783400],
+                [-63.181000, -17.783950],
+                [-63.181500, -17.784200],
+                [-63.182000, -17.784100],
+                [-63.182300, -17.783700],
+                [-63.182100, -17.783300],
+            ]],
+        },
+        "3120.10",
+        "228.64",
+        7,
+    ),
+]
+
+RISK_ZONES = [
+    (
+        "CE-001",
+        "Zona de tráfico alto San Martín",
+        "Zona de circulación vehicular densa cercana al Centro Educativo San Martín.",
+        RiskZoneType.TRAFICO,
+        RiskZoneSeverity.ALTO,
+        {
+            "type": "Polygon",
+            "coordinates": [[
+                [-84.090900, 9.928900],
+                [-84.090200, 9.929050],
+                [-84.089950, 9.928450],
+                [-84.090700, 9.928250],
+                [-84.090900, 9.928900],
+            ]],
+        },
+    ),
+    (
+        "CE-002",
+        "Zona oscura Florida",
+        "Sector con iluminación deficiente cercano al Colegio Nacional Florida.",
+        RiskZoneType.ZONA_OSCURA,
+        RiskZoneSeverity.MEDIO,
+        {
+            "type": "Polygon",
+            "coordinates": [[
+                [-63.182400, -17.783900],
+                [-63.181900, -17.783750],
+                [-63.181700, -17.784150],
+                [-63.182250, -17.784320],
+                [-63.182400, -17.783900],
+            ]],
+        },
+    ),
+    (
+        None,
+        "Zona general de delincuencia",
+        "Área general reportada por vecinos con incidentes de delincuencia.",
+        RiskZoneType.DELINCUENCIA,
+        RiskZoneSeverity.ALTO,
+        {
+            "type": "Polygon",
+            "coordinates": [[
+                [-63.179500, -17.782800],
+                [-63.178900, -17.782700],
+                [-63.178700, -17.783250],
+                [-63.179300, -17.783400],
+                [-63.179500, -17.782800],
+            ]],
+        },
+    ),
 ]
 
 
@@ -121,11 +237,16 @@ class Command(BaseCommand):
             roles[name] = role
 
         self._sync_role_permissions(roles, permissions_by_code)
-        centers = self._seed_centers()
+        regents = self._seed_regents(roles["Regente"])
+        centers = self._seed_centers(regents)
         devices = self._seed_devices()
         self._seed_children(centers, devices)
         admin_user = self._seed_admin_user(roles["Administrador"])
-        self._seed_tutors(admin_user)
+        self._seed_tutors(admin_user, roles["Tutor"])
+        self._seed_safe_areas(centers, admin_user)
+        self._seed_risk_zones(centers, admin_user)
+        self._seed_monitoring_config()
+        self._seed_child_tutor_associations(admin_user)
 
     def _seed_admin_user(self, admin_role: Role):
         user, created = User.objects.update_or_create(
@@ -171,12 +292,46 @@ class Command(BaseCommand):
                 [RolePermission(role=role, permission=permissions_by_code[permission_code]) for permission_code in permission_codes]
             )
 
-    def _seed_centers(self):
+    def _seed_regents(self, regent_role: Role):
+        regents_data = [
+            ("Regente Juan Pérez", "regente1@colegio.com"),
+            ("Regente Marta Salvatierra", "regente2@colegio.com"),
+            ("Regente Luis Roca", "regente3@colegio.com"),
+        ]
+        regents: dict[str, User] = {}
+        for nombre, email in regents_data:
+            regent, _ = User.objects.update_or_create(
+                email=email,
+                defaults={
+                    "nombre": nombre,
+                    "rol": UserRole.REGENTE,
+                    "role": regent_role,
+                    "is_active": True,
+                    "is_staff": False,
+                    "username": email,
+                },
+            )
+            regent.set_password("12345678")
+            regent.save()
+            regents[email] = regent
+        return regents
+
+    def _seed_centers(self, regents: dict[str, User]):
         centers: dict[str, EducationalCenter] = {}
-        for code, name in EDUCATIONAL_CENTERS:
+        for code, name, address, phone, email, shift, description, is_active, regent_email in EDUCATIONAL_CENTERS:
             center, _ = EducationalCenter.objects.update_or_create(
                 code=code,
-                defaults={"name": name, "is_active": True},
+                defaults={
+                    "name": name,
+                    "address": address,
+                    "phone": phone,
+                    "email": email,
+                    "shift": shift,
+                    "description": description,
+                    "is_active": is_active,
+                    "deactivation_reason": "" if is_active else "Centro cerrado temporalmente",
+                    "regent": regents.get(regent_email) if regent_email else None,
+                },
             )
             centers[code] = center
         return centers
@@ -207,7 +362,7 @@ class Command(BaseCommand):
                 },
             )
 
-    def _seed_tutors(self, admin_user: User):
+    def _seed_tutors(self, admin_user: User, tutor_role: Role):
         children_by_id = {child.id: child for child in Child.objects.all()}
         for tutor_data in TUTORS:
             (
@@ -239,3 +394,223 @@ class Command(BaseCommand):
                 },
             )
             tutor.children.set([children_by_id[child_id] for child_id in child_ids if child_id in children_by_id])
+
+            if correo_acceso:
+                user, _ = User.objects.update_or_create(
+                    email=correo_acceso,
+                    defaults={
+                        "nombre": f"{nombres} {apellidos}",
+                        "rol": UserRole.TUTOR,
+                        "role": tutor_role,
+                        "is_active": cuenta_movil_estado == MobileAccountStatus.ACTIVA,
+                        "is_staff": False,
+                        "username": correo_acceso,
+                    },
+                )
+                user.set_password("12345678")
+                user.save()
+
+    def _seed_child_tutor_associations(self, admin_user: User):
+        expected_pairs: set[tuple[int, int]] = set()
+
+        children_by_id = {child.id: child for child in Child.objects.all()}
+        tutors_by_email = {tutor.correo_electronico: tutor for tutor in Tutor.objects.all()}
+
+        for _, _, correo, _, _, _, _, _, _, child_ids in TUTORS:
+            tutor = tutors_by_email.get(correo)
+            if not tutor:
+                continue
+
+            for child_id in child_ids:
+                child = children_by_id.get(child_id)
+                if not child:
+                    continue
+                expected_pairs.add((child.id, tutor.id))
+                is_active = child.status == ChildStatus.ACTIVO and tutor.estado == TutorStatus.ACTIVO
+                association, created = ChildTutorAssociation.objects.update_or_create(
+                    child=child,
+                    tutor=tutor,
+                    defaults={
+                        "is_active": is_active,
+                        "created_by": admin_user,
+                        "deactivated_at": None if is_active else timezone.now(),
+                        "deactivated_by": None if is_active else admin_user,
+                    },
+                )
+                if created:
+                    create_child_tutor_history(
+                        association=association,
+                        action=ChildTutorAssociationAction.CREACION,
+                        detail="Asociación inicial cargada por seed.",
+                        user=admin_user,
+                    )
+
+        for association in ChildTutorAssociation.objects.select_related("child", "tutor").all():
+            if (association.child_id, association.tutor_id) in expected_pairs:
+                continue
+            association.is_active = False
+            association.deactivated_at = timezone.now()
+            association.deactivated_by = admin_user
+            association.save(update_fields=["is_active", "deactivated_at", "deactivated_by", "updated_at"])
+            sync_tutor_children_mirror(association.tutor)
+        for tutor in Tutor.objects.all():
+            sync_tutor_children_mirror(tutor)
+        for child in Child.objects.all():
+            refresh_child_tutor_reference(child)
+
+    def _seed_safe_areas(self, centers: dict[str, EducationalCenter], admin_user: User):
+        for center_code, name, polygon, area_m2, perimeter_m, points_count in SAFE_AREAS:
+            center = centers[center_code]
+            safe_area, _ = SafeArea.objects.update_or_create(
+                educational_center=center,
+                name=name,
+                defaults={
+                    "status": SafeAreaStatus.ACTIVA,
+                    "polygon": polygon,
+                    "area_m2": area_m2,
+                    "perimeter_m": perimeter_m,
+                    "points_count": points_count,
+                    "created_by": admin_user,
+                    "updated_by": admin_user,
+                    "is_active": True,
+                },
+            )
+
+            history_payloads = [
+                (
+                    SafeAreaHistoryAction.CREACION,
+                    None,
+                    polygon,
+                    None,
+                    area_m2,
+                    None,
+                    perimeter_m,
+                    points_count,
+                ),
+                (
+                    SafeAreaHistoryAction.ACTUALIZACION,
+                    polygon,
+                    polygon,
+                    area_m2,
+                    area_m2,
+                    perimeter_m,
+                    perimeter_m,
+                    points_count,
+                ),
+            ]
+
+            for index, (
+                action,
+                previous_polygon,
+                new_polygon,
+                previous_area_m2,
+                new_area_m2,
+                previous_perimeter_m,
+                new_perimeter_m,
+                points_count_value,
+            ) in enumerate(history_payloads, start=1):
+                SafeAreaHistory.objects.update_or_create(
+                    safe_area=safe_area,
+                    educational_center=center,
+                    action=action,
+                    points_count=points_count_value,
+                    new_area_m2=new_area_m2,
+                    defaults={
+                        "previous_polygon": previous_polygon,
+                        "new_polygon": new_polygon,
+                        "previous_area_m2": previous_area_m2,
+                        "new_area_m2": new_area_m2,
+                        "previous_perimeter_m": previous_perimeter_m,
+                        "new_perimeter_m": new_perimeter_m,
+                        "user": admin_user,
+                    },
+                )
+
+    def _quantize_measure(self, value: float):
+        return Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def _quantize_coordinate(self, value: float):
+        return Decimal(value).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+    def _measure_polygon(self, polygon: dict):
+        ring = polygon["coordinates"][0]
+        unique_points = ring[:-1]
+        mean_lat_rad = math.radians(sum(lat for _, lat in unique_points) / len(unique_points))
+        origin_lng, origin_lat = unique_points[0]
+        earth_radius = 6371000.0
+
+        projected = []
+        for lng, lat in unique_points:
+            x = math.radians(lng - origin_lng) * earth_radius * math.cos(mean_lat_rad)
+            y = math.radians(lat - origin_lat) * earth_radius
+            projected.append((x, y))
+
+        area = 0.0
+        perimeter = 0.0
+        for index, (x1, y1) in enumerate(projected):
+            x2, y2 = projected[(index + 1) % len(projected)]
+            area += x1 * y2 - x2 * y1
+            perimeter += math.hypot(x2 - x1, y2 - y1)
+
+        center_longitude = sum(point[0] for point in unique_points) / len(unique_points)
+        center_latitude = sum(point[1] for point in unique_points) / len(unique_points)
+        return {
+            "area_m2": self._quantize_measure(abs(area) / 2),
+            "perimeter_m": self._quantize_measure(perimeter),
+            "center_longitude": self._quantize_coordinate(center_longitude),
+            "center_latitude": self._quantize_coordinate(center_latitude),
+        }
+
+    def _seed_risk_zones(self, centers: dict[str, EducationalCenter], admin_user: User):
+        for center_code, name, description, risk_type, severity, polygon in RISK_ZONES:
+            measurements = self._measure_polygon(polygon)
+            center = centers[center_code] if center_code else None
+            risk_zone = RiskZone.objects.filter(educational_center=center, name=name).first()
+            if risk_zone is None:
+                risk_zone = RiskZone(educational_center=center, name=name, created_by=admin_user)
+
+            risk_zone.description = description
+            risk_zone.risk_type = risk_type
+            risk_zone.severity = severity
+            risk_zone.polygon = polygon
+            risk_zone.center_latitude = measurements["center_latitude"]
+            risk_zone.center_longitude = measurements["center_longitude"]
+            risk_zone.area_m2 = measurements["area_m2"]
+            risk_zone.perimeter_m = measurements["perimeter_m"]
+            risk_zone.is_active = True
+            risk_zone.deleted_at = None
+            risk_zone.deleted_by = None
+            risk_zone.updated_by = admin_user
+            risk_zone.save()
+
+        for zone in RiskZone.objects.all():
+            if not zone.polygon:
+                continue
+            measurements = self._measure_polygon(zone.polygon)
+            if zone.code and zone.center_latitude is not None and zone.center_longitude is not None and zone.area_m2 and zone.perimeter_m:
+                continue
+            zone.risk_type = zone.risk_type or RiskZoneType.OTRO
+            zone.severity = {
+                "ALTA": RiskZoneSeverity.ALTO,
+                "MEDIA": RiskZoneSeverity.MEDIO,
+                "BAJA": RiskZoneSeverity.BAJO,
+            }.get(zone.severity, zone.severity)
+            zone.center_latitude = measurements["center_latitude"]
+            zone.center_longitude = measurements["center_longitude"]
+            zone.area_m2 = measurements["area_m2"]
+            zone.perimeter_m = measurements["perimeter_m"]
+            zone.created_by = zone.created_by or admin_user
+            zone.updated_by = admin_user
+            zone.save()
+
+    def _seed_monitoring_config(self):
+        MonitoringConfig.objects.update_or_create(
+            id=1,
+            defaults={
+                "min_time_between_alerts_min": 5,
+                "min_distance_state_change_m": 10,
+                "max_gps_accuracy_m": 50,
+                "enable_risk_zones": True,
+                "register_errors_as_pending": True,
+            },
+        )

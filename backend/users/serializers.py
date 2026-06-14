@@ -1,11 +1,15 @@
 from datetime import date
 
 from django.db import transaction
+from django.db.models import Max
 from rest_framework import serializers
 
 from .models import (
     Child,
     ChildStatus,
+    ChildTutorAssociation,
+    ChildTutorAssociationAction,
+    ChildTutorAssociationHistory,
     EducationalCenter,
     GPSDevice,
     MobileAccountStatus,
@@ -13,8 +17,26 @@ from .models import (
     Permission,
     Role,
     RolePermission,
+    SafeArea,
+    SafeAreaHistory,
+    GeographicLocation,
+    MonitoringAlert,
+    MonitoringConfig,
+    MonitoringHistory,
+    MonitoringStatus,
+    LocationDeliveryStatus,
+    SecurityAlertHistory,
+    SecurityAlertHistoryAction,
+    SecurityAlertPriority,
+    SecurityAlertStatus,
+    SafeAreaStatus,
+    RiskZone,
+    RiskZoneSeverity,
+    RiskZoneType,
     Tutor,
     TutorStatus,
+    User,
+    UserRole,
 )
 
 
@@ -180,11 +202,273 @@ class RoleStatusSerializer(serializers.Serializer):
     is_active = serializers.BooleanField()
 
 
-class EducationalCenterSerializer(serializers.ModelSerializer):
+class RegentOptionSerializer(serializers.ModelSerializer):
+    full_name = serializers.CharField(source="nombre", read_only=True)
+
+    class Meta:
+        model = User
+        fields = ("id", "full_name", "email")
+
+
+class EducationalCenterOptionSerializer(serializers.ModelSerializer):
     class Meta:
         model = EducationalCenter
         fields = ("id", "code", "name", "is_active")
 
+
+class EducationalCenterSerializer(serializers.ModelSerializer):
+    status = serializers.SerializerMethodField()
+    regent = RegentOptionSerializer(read_only=True)
+    children_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = EducationalCenter
+        fields = (
+            "id",
+            "code",
+            "name",
+            "address",
+            "phone",
+            "email",
+            "shift",
+            "status",
+            "is_active",
+            "regent",
+            "children_count",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_status(self, obj: EducationalCenter):
+        return obj.status
+
+
+class EducationalCenterDetailSerializer(EducationalCenterSerializer):
+    class Meta(EducationalCenterSerializer.Meta):
+        fields = EducationalCenterSerializer.Meta.fields + (
+            "description",
+            "latitude",
+            "longitude",
+            "deactivation_reason",
+        )
+
+
+class EducationalCenterCreateUpdateSerializer(serializers.ModelSerializer):
+    regent_id = serializers.PrimaryKeyRelatedField(
+        source="regent",
+        queryset=User.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    status = serializers.ChoiceField(choices=(("activo", "Activo"), ("inactivo", "Inactivo")))
+
+    class Meta:
+        model = EducationalCenter
+        fields = (
+            "id",
+            "code",
+            "name",
+            "address",
+            "phone",
+            "email",
+            "shift",
+            "description",
+            "latitude",
+            "longitude",
+            "status",
+            "deactivation_reason",
+            "regent_id",
+        )
+
+    def validate_code(self, value: str):
+        value = value.strip()
+        if not value:
+            return value
+        qs = EducationalCenter.objects.filter(code__iexact=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("Ya existe un centro educativo con ese código.")
+        return value.upper()
+
+    def validate_name(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("El nombre del centro educativo es obligatorio.")
+        qs = EducationalCenter.objects.filter(name__iexact=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("Ya existe un centro educativo con ese nombre.")
+        return value
+
+    def validate_address(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("La dirección es obligatoria.")
+        return value
+
+    def validate_phone(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("El teléfono es obligatorio.")
+        if len(value) < 7 or not all(char.isdigit() or char in {" ", "+", "-"} for char in value):
+            raise serializers.ValidationError("El teléfono debe tener formato válido.")
+        return value
+
+    def validate_email(self, value: str):
+        value = value.strip().lower()
+        if not value:
+            raise serializers.ValidationError("El correo electrónico es obligatorio.")
+        return value
+
+    def validate_description(self, value: str):
+        return value.strip()
+
+    def validate_deactivation_reason(self, value: str):
+        return value.strip()
+
+    def validate_regent(self, value: User | None):
+        if value is None:
+            return value
+        is_regent = value.rol == UserRole.REGENTE or (value.role and value.role.name.strip().lower() == "regente")
+        if not is_regent:
+            raise serializers.ValidationError("Solo puede asignar usuarios con rol Regente.")
+        return value
+
+    def validate(self, attrs):
+        status_value = attrs.get("status", self.instance.status if self.instance else "activo")
+        reason = attrs.get("deactivation_reason", getattr(self.instance, "deactivation_reason", ""))
+        if status_value == "inactivo" and len(reason) > 200:
+            raise serializers.ValidationError(
+                {"deactivation_reason": ["El motivo de desactivación no puede exceder 200 caracteres."]}
+            )
+        if status_value == "activo":
+            attrs["deactivation_reason"] = ""
+        return attrs
+
+    def create(self, validated_data):
+        status_value = validated_data.pop("status")
+        validated_data["is_active"] = status_value == "activo"
+        validated_data["code"] = validated_data.get("code") or self._generate_code()
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        status_value = validated_data.pop("status")
+        validated_data["is_active"] = status_value == "activo"
+        if validated_data["is_active"]:
+            validated_data["deactivation_reason"] = ""
+        return super().update(instance, validated_data)
+
+    def _generate_code(self) -> str:
+        max_code = EducationalCenter.objects.filter(code__startswith="CEN-").aggregate(max_code=Max("code"))["max_code"]
+        if not max_code:
+            return "CEN-0001"
+        try:
+            next_number = int(max_code.split("-")[1]) + 1
+        except (IndexError, ValueError):
+            next_number = EducationalCenter.objects.count() + 1
+        return f"CEN-{next_number:04d}"
+
+
+class EducationalCenterStatusSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=(("activo", "Activo"), ("inactivo", "Inactivo")))
+    motivo_desactivacion = serializers.CharField(required=False, allow_blank=True, max_length=200)
+
+
+class SafeAreaCenterSerializer(serializers.ModelSerializer):
+    regente = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EducationalCenter
+        fields = ("id", "name", "address", "phone", "regente")
+
+    def get_regente(self, obj: EducationalCenter):
+        return obj.regent.nombre if obj.regent else None
+
+
+class SafeAreaSerializer(serializers.ModelSerializer):
+    educational_center = SafeAreaCenterSerializer(read_only=True)
+
+    class Meta:
+        model = SafeArea
+        fields = (
+            "id",
+            "educational_center",
+            "status",
+            "area_m2",
+            "perimeter_m",
+            "points_count",
+            "created_at",
+            "updated_at",
+        )
+
+
+class SafeAreaDetailSerializer(SafeAreaSerializer):
+    polygon = serializers.JSONField(read_only=True)
+    name = serializers.CharField(read_only=True)
+    is_active = serializers.BooleanField(read_only=True)
+
+    class Meta(SafeAreaSerializer.Meta):
+        fields = SafeAreaSerializer.Meta.fields + ("name", "polygon", "is_active")
+
+
+class SafeAreaCreateUpdateSerializer(serializers.ModelSerializer):
+    educational_center_id = serializers.PrimaryKeyRelatedField(
+        source="educational_center",
+        queryset=EducationalCenter.objects.all(),
+    )
+
+    class Meta:
+        model = SafeArea
+        fields = ("id", "educational_center_id", "name", "status", "polygon", "is_active")
+
+    def validate_name(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("El nombre del área segura es obligatorio.")
+        return value
+
+    def validate_polygon(self, value):
+        if not value:
+            raise serializers.ValidationError("El polígono es obligatorio.")
+        return value
+
+    def validate_status(self, value):
+        if value not in {SafeAreaStatus.ACTIVA, SafeAreaStatus.INACTIVA}:
+            raise serializers.ValidationError("Estado inválido.")
+        return value
+
+
+class SafeAreaStatusSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=SafeAreaStatus.choices)
+
+
+class SafeAreaHistorySerializer(serializers.ModelSerializer):
+    user = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SafeAreaHistory
+        fields = (
+            "id",
+            "action",
+            "previous_polygon",
+            "new_polygon",
+            "previous_area_m2",
+            "new_area_m2",
+            "previous_perimeter_m",
+            "new_perimeter_m",
+            "points_count",
+            "user",
+            "created_at",
+        )
+
+    def get_user(self, obj: SafeAreaHistory):
+        return obj.user.nombre if obj.user else None
+
+
+class SafeAreaPolygonPayloadSerializer(serializers.Serializer):
+    polygon = serializers.JSONField(required=True)
 
 class GPSDeviceSerializer(serializers.ModelSerializer):
     assignment_status = serializers.CharField(read_only=True)
@@ -192,6 +476,351 @@ class GPSDeviceSerializer(serializers.ModelSerializer):
     class Meta:
         model = GPSDevice
         fields = ("id", "code", "model", "imei", "is_active", "assignment_status")
+
+
+class GeographicLocationRegisterSerializer(serializers.Serializer):
+    dispositivo_id = serializers.CharField(required=True, max_length=40)
+    nino_id = serializers.IntegerField(required=True, min_value=1)
+    latitud = serializers.FloatField(required=True)
+    longitud = serializers.FloatField(required=True)
+    precision = serializers.FloatField(required=True)
+    velocidad = serializers.FloatField(required=False, allow_null=True)
+    fecha_hora = serializers.DateTimeField(required=True)
+    estado_envio = serializers.ChoiceField(
+        choices=LocationDeliveryStatus.choices,
+        required=False,
+        default=LocationDeliveryStatus.ENVIADO,
+    )
+
+    def validate_latitud(self, value: float):
+        if value < -90 or value > 90:
+            raise serializers.ValidationError("La latitud debe estar entre -90 y 90.")
+        return value
+
+    def validate_longitud(self, value: float):
+        if value < -180 or value > 180:
+            raise serializers.ValidationError("La longitud debe estar entre -180 y 180.")
+        return value
+
+    def validate_precision(self, value: float):
+        if value <= 0 or value > 1000:
+            raise serializers.ValidationError("La precisión GPS está fuera del rango aceptable.")
+        return value
+
+    def validate_velocidad(self, value: float | None):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("La velocidad no puede ser negativa.")
+        return value
+
+
+class GeographicLocationSerializer(serializers.ModelSerializer):
+    nino_id = serializers.IntegerField(source="child.id", read_only=True)
+    dispositivo_id = serializers.CharField(source="device.code", read_only=True)
+    fecha_hora = serializers.DateTimeField(source="device_timestamp", read_only=True)
+    punto = serializers.SerializerMethodField()
+    dentro_area_segura = serializers.BooleanField(source="inside_safe_area", read_only=True, allow_null=True)
+
+    class Meta:
+        model = GeographicLocation
+        fields = (
+            "id",
+            "nino_id",
+            "dispositivo_id",
+            "fecha_hora",
+            "punto",
+            "dentro_area_segura",
+            "precision",
+            "speed",
+            "delivery_status",
+            "server_received_at",
+        )
+
+    def get_punto(self, obj: GeographicLocation):
+        return f"POINT({obj.longitude} {obj.latitude})"
+
+
+class GeographicLocationHistorySerializer(serializers.ModelSerializer):
+    nino = serializers.SerializerMethodField()
+    dispositivo = serializers.SerializerMethodField()
+    punto = serializers.SerializerMethodField()
+    creado_por = serializers.SerializerMethodField()
+
+    class Meta:
+        model = GeographicLocation
+        fields = (
+            "id",
+            "nino",
+            "dispositivo",
+            "latitude",
+            "longitude",
+            "precision",
+            "speed",
+            "device_timestamp",
+            "server_received_at",
+            "delivery_status",
+            "inside_safe_area",
+            "punto",
+            "creado_por",
+            "source_ip",
+            "source_host",
+        )
+
+    def get_nino(self, obj: GeographicLocation):
+        return {
+            "id": obj.child.id,
+            "code": obj.child.code,
+            "nombre_completo": f"{obj.child.nombres} {obj.child.apellidos}",
+        }
+
+    def get_dispositivo(self, obj: GeographicLocation):
+        return {
+            "id": obj.device.id,
+            "code": obj.device.code,
+            "model": obj.device.model,
+        }
+
+    def get_punto(self, obj: GeographicLocation):
+        return f"POINT({obj.longitude} {obj.latitude})"
+
+    def get_creado_por(self, obj: GeographicLocation):
+        return obj.created_by.nombre if obj.created_by else None
+
+
+class MonitoringAnalyzeSerializer(serializers.Serializer):
+    ubicacion_id = serializers.IntegerField(required=True, min_value=1)
+
+
+class MonitoringAlertSerializer(serializers.ModelSerializer):
+    child_id = serializers.IntegerField(source="child.id", read_only=True)
+    ubicacion_id = serializers.IntegerField(source="location_record.id", read_only=True)
+    fecha_hora = serializers.DateTimeField(source="created_at", read_only=True)
+
+    class Meta:
+        model = MonitoringAlert
+        fields = (
+            "id",
+            "child_id",
+            "alert_type",
+            "reason",
+            "ubicacion_id",
+            "status",
+            "latitude",
+            "longitude",
+            "fecha_hora",
+            "active",
+        )
+
+
+class SecurityAlertStatusSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=SecurityAlertStatus.choices)
+    comment = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+
+class SecurityAlertCreateSerializer(serializers.Serializer):
+    child_id = serializers.IntegerField(min_value=1)
+    location_record_id = serializers.IntegerField(min_value=1)
+    monitoring_history_id = serializers.IntegerField(min_value=1, required=False)
+    alert_type = serializers.ChoiceField(choices=MonitoringAlert._meta.get_field("alert_type").choices)
+    priority = serializers.ChoiceField(choices=SecurityAlertPriority.choices)
+    title = serializers.CharField(max_length=150)
+    description = serializers.CharField(max_length=255)
+    latitude = serializers.FloatField()
+    longitude = serializers.FloatField()
+    accuracy = serializers.FloatField(required=False, allow_null=True)
+    speed = serializers.FloatField(required=False, allow_null=True)
+    event_datetime = serializers.DateTimeField()
+
+
+class SecurityAlertHistorySerializer(serializers.ModelSerializer):
+    changed_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SecurityAlertHistory
+        fields = (
+            "id",
+            "action",
+            "previous_status",
+            "new_status",
+            "comment",
+            "changed_by",
+            "changed_at",
+            "metadata",
+        )
+
+    def get_changed_by(self, obj: SecurityAlertHistory):
+        return obj.changed_by.nombre if obj.changed_by else None
+
+
+class RiskZoneSerializer(serializers.ModelSerializer):
+    educational_center = SafeAreaCenterSerializer(read_only=True)
+    risk_level = serializers.CharField(source="severity", read_only=True)
+    center = serializers.SerializerMethodField()
+    created_by = serializers.SerializerMethodField()
+    updated_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RiskZone
+        fields = (
+            "id",
+            "code",
+            "name",
+            "description",
+            "educational_center",
+            "center",
+            "risk_type",
+            "risk_level",
+            "polygon",
+            "center_latitude",
+            "center_longitude",
+            "area_m2",
+            "perimeter_m",
+            "is_active",
+            "created_by",
+            "updated_by",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_center(self, obj: RiskZone):
+        if obj.center_longitude is None or obj.center_latitude is None:
+            return None
+        return {
+            "longitude": str(obj.center_longitude),
+            "latitude": str(obj.center_latitude),
+        }
+
+    def get_created_by(self, obj: RiskZone):
+        return obj.created_by.nombre if obj.created_by else None
+
+    def get_updated_by(self, obj: RiskZone):
+        return obj.updated_by.nombre if obj.updated_by else None
+
+
+class RiskZoneCreateUpdateSerializer(serializers.ModelSerializer):
+    educational_center_id = serializers.PrimaryKeyRelatedField(
+        source="educational_center",
+        queryset=EducationalCenter.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    risk_level = serializers.ChoiceField(source="severity", choices=RiskZoneSeverity.choices)
+
+    class Meta:
+        model = RiskZone
+        fields = (
+            "id",
+            "educational_center_id",
+            "name",
+            "description",
+            "risk_type",
+            "risk_level",
+            "polygon",
+            "is_active",
+        )
+
+    def validate_name(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("El nombre de la zona de riesgo es obligatorio.")
+        return value
+
+    def validate_risk_level(self, value: str):
+        legacy_map = {
+            "ALTA": RiskZoneSeverity.ALTO,
+            "MEDIA": RiskZoneSeverity.MEDIO,
+            "BAJA": RiskZoneSeverity.BAJO,
+        }
+        return legacy_map.get(value, value)
+
+    def validate_description(self, value: str):
+        return value.strip()
+
+    def validate_polygon(self, value):
+        if not value:
+            raise serializers.ValidationError("El polígono es obligatorio.")
+        return value
+
+    def validate(self, attrs):
+        educational_center = attrs.get("educational_center")
+        name = attrs.get("name", "").strip()
+        queryset = RiskZone.objects.filter(deleted_at__isnull=True)
+
+        if educational_center is None:
+            queryset = queryset.filter(educational_center__isnull=True)
+        else:
+            queryset = queryset.filter(educational_center=educational_center)
+
+        if self.instance is not None:
+            queryset = queryset.exclude(pk=self.instance.pk)
+
+        if queryset.filter(name__iexact=name).exists():
+            if educational_center is None:
+                raise serializers.ValidationError(
+                    {"name": "Ya existe una zona general con ese nombre."}
+                )
+            raise serializers.ValidationError(
+                {"name": "Ya existe una zona de riesgo con ese nombre para el centro educativo seleccionado."}
+            )
+
+        return attrs
+
+
+class RiskZoneStatusSerializer(serializers.Serializer):
+    is_active = serializers.BooleanField()
+
+
+class RiskZonePolygonPayloadSerializer(serializers.Serializer):
+    polygon = serializers.JSONField(required=True)
+
+
+class MonitoringHistorySerializer(serializers.ModelSerializer):
+    child_id = serializers.IntegerField(source="child.id", read_only=True)
+    ubicacion_id = serializers.IntegerField(source="location_record.id", read_only=True)
+    zona_riesgo_id = serializers.IntegerField(source="risk_zone.id", read_only=True, allow_null=True)
+    alerta_id = serializers.IntegerField(source="alert.id", read_only=True, allow_null=True)
+
+    class Meta:
+        model = MonitoringHistory
+        fields = (
+            "id",
+            "child_id",
+            "ubicacion_id",
+            "status",
+            "reason",
+            "distance_to_perimeter_m",
+            "zona_riesgo_id",
+            "alerta_id",
+            "created_at",
+            "additional_info",
+        )
+
+
+class MonitoringConfigSerializer(serializers.ModelSerializer):
+    tiempo_minimo_entre_alertas_min = serializers.IntegerField(source="min_time_between_alerts_min")
+    distancia_minima_cambio_estado_m = serializers.IntegerField(source="min_distance_state_change_m")
+    precision_gps_maxima_m = serializers.IntegerField(source="max_gps_accuracy_m")
+    habilitar_zonas_riesgo = serializers.BooleanField(source="enable_risk_zones")
+    registrar_errores_como_pendientes = serializers.BooleanField(source="register_errors_as_pending")
+
+    class Meta:
+        model = MonitoringConfig
+        fields = (
+            "tiempo_minimo_entre_alertas_min",
+            "distancia_minima_cambio_estado_m",
+            "precision_gps_maxima_m",
+            "habilitar_zonas_riesgo",
+            "registrar_errores_como_pendientes",
+        )
+
+
+class MonitoringCurrentStatusSerializer(serializers.Serializer):
+    child_id = serializers.IntegerField()
+    nombre = serializers.CharField()
+    estado_actual = serializers.ChoiceField(choices=MonitoringStatus.choices)
+    motivo = serializers.CharField()
+    fecha_hora = serializers.DateTimeField()
+    ubicacion = serializers.DictField()
+    alerta_activa = serializers.BooleanField()
 
 
 class ChildListSerializer(serializers.ModelSerializer):
@@ -501,6 +1130,124 @@ class TutorWriteSerializer(serializers.ModelSerializer):
         if len(found) != len(set(value)):
             raise serializers.ValidationError("Debe asociar al menos un niño.")
         return list(dict.fromkeys(value))
+
+
+class ChildTutorAssociationChildSerializer(serializers.ModelSerializer):
+    nombre_completo = serializers.SerializerMethodField()
+    centro_educativo = EducationalCenterSerializer(read_only=True)
+    dispositivo_gps = GPSDeviceSerializer(read_only=True)
+
+    class Meta:
+        model = Child
+        fields = (
+            "id",
+            "code",
+            "nombre_completo",
+            "fecha_nacimiento",
+            "edad",
+            "curso",
+            "centro_educativo",
+            "dispositivo_gps",
+            "status",
+            "tutor_reference",
+        )
+
+    def get_nombre_completo(self, obj: Child):
+        return f"{obj.nombres} {obj.apellidos}"
+
+
+class ChildTutorAssociationTutorSerializer(serializers.ModelSerializer):
+    nombre_completo = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Tutor
+        fields = (
+            "id",
+            "nombre_completo",
+            "correo_electronico",
+            "telefono",
+            "parentesco",
+            "estado",
+        )
+
+    def get_nombre_completo(self, obj: Tutor):
+        return obj.nombre_completo
+
+
+class ChildTutorAssociationSerializer(serializers.ModelSerializer):
+    child = ChildTutorAssociationChildSerializer(read_only=True)
+    tutor = ChildTutorAssociationTutorSerializer(read_only=True)
+
+    class Meta:
+        model = ChildTutorAssociation
+        fields = (
+            "id",
+            "child",
+            "tutor",
+            "is_active",
+            "created_at",
+            "updated_at",
+            "deactivated_at",
+        )
+
+
+class ChildTutorAssociationHistorySerializer(serializers.ModelSerializer):
+    user = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ChildTutorAssociationHistory
+        fields = ("id", "action", "detail", "user", "created_at")
+
+    def get_user(self, obj: ChildTutorAssociationHistory):
+        return obj.user.nombre if obj.user else None
+
+
+class ChildTutorAssociationCreateSerializer(serializers.Serializer):
+    child_id = serializers.IntegerField(min_value=1)
+    tutor_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        allow_empty=False,
+    )
+
+    def validate_child_id(self, value):
+        if not Child.objects.filter(pk=value).exists():
+            raise serializers.ValidationError("El niño seleccionado no existe.")
+        return value
+
+    def validate_tutor_ids(self, value):
+        if not value:
+            raise serializers.ValidationError("Debe seleccionar al menos un tutor.")
+        distinct_ids = list(dict.fromkeys(value))
+        found = set(Tutor.objects.filter(id__in=distinct_ids).values_list("id", flat=True))
+        if len(found) != len(distinct_ids):
+            raise serializers.ValidationError("Debe seleccionar tutores válidos.")
+        return distinct_ids
+
+    def validate(self, attrs):
+        child = Child.objects.filter(pk=attrs["child_id"]).first()
+        if not child:
+            raise serializers.ValidationError({"child_id": ["El niño seleccionado no existe."]})
+        if child.status != ChildStatus.ACTIVO:
+            raise serializers.ValidationError({"child_id": ["El niño debe estar activo."]})
+
+        tutors = list(Tutor.objects.filter(id__in=attrs["tutor_ids"]).order_by("id"))
+        inactive_tutors = [tutor.nombre_completo for tutor in tutors if tutor.estado != TutorStatus.ACTIVO]
+        if inactive_tutors:
+            raise serializers.ValidationError({"tutor_ids": ["Todos los tutores deben estar activos."]})
+
+        duplicated = list(
+            ChildTutorAssociation.objects.filter(
+                child_id=child.id,
+                tutor_id__in=attrs["tutor_ids"],
+                is_active=True,
+            ).values_list("tutor_id", flat=True)
+        )
+        if duplicated:
+            raise serializers.ValidationError({"tutor_ids": ["Este tutor ya está asociado a este niño."]})
+
+        attrs["child"] = child
+        attrs["tutors"] = tutors
+        return attrs
 
     def validate_estado(self, value: str):
         if value not in {TutorStatus.ACTIVO, TutorStatus.INACTIVO}:

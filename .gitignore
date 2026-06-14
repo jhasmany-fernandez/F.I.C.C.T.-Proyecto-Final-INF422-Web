@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# F.I.C.C.T. Proyecto Final INF412 Web
+# Frontend (Next.js / TypeScript)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+frontend/*.tsbuildinfo
+
+# Backend (Django)
+backend/media/
+backend/staticfiles/
+
+# Archivos temporales locales del repositorio
+.tmp-*.py
+.tmp-*.mjs

@@ -49,11 +49,11 @@ docker compose up --build
 
 ## URLs esperadas
 
-- Frontend: `http://34.69.89.232:5656`
-- Backend: `http://34.69.89.232:8787`
-- Login API: `http://34.69.89.232:8787/api/auth/login/`
-- Roles y Permisos: `http://34.69.89.232:5656/roles-permisos`
-- Niños Monitoreados: `http://34.69.89.232:5656/ninos-monitoreados`
+- Frontend: `http://177.222.97.205:5656`
+- Backend: `http://177.222.97.205:8787`
+- Login API: `http://177.222.97.205:8787/api/auth/login/`
+- Roles y Permisos: `http://177.222.97.205:5656/roles-permisos`
+- Niños Monitoreados: `http://177.222.97.205:5656/ninos-monitoreados`
 
 ## Endpoints nuevos CU03
 
@@ -165,7 +165,7 @@ docker compose exec backend python manage.py createsuperuser
 ## CORS y seguridad
 
 - CORS permitido para:
-  - `http://34.69.89.232:5656`
+  - `http://177.222.97.205:5656`
   - `http://localhost:5656`
 - La API de login usa JWT y `AllowAny`.
 - La configuración sensible se carga desde variables de entorno.
@@ -199,7 +199,7 @@ docker compose exec backend python manage.py migrate
 ## Cómo probar CU03
 
 1. Inicie sesión con `admin@colegio.com / 12345678`.
-2. Ingrese a `http://34.69.89.232:5656/roles-permisos`.
+2. Ingrese a `http://177.222.97.205:5656/roles-permisos`.
 3. Revise las tarjetas resumen y la tabla de roles.
 4. Cree un rol nuevo con al menos un permiso.
 5. Edite el rol creado y verifique el panel lateral de detalle.
@@ -209,7 +209,7 @@ docker compose exec backend python manage.py migrate
 ## Cómo probar CU04
 
 1. Inicie sesión con `admin@colegio.com / 12345678`.
-2. Abra `http://34.69.89.232:5656/ninos-monitoreados`.
+2. Abra `http://177.222.97.205:5656/ninos-monitoreados`.
 3. Revise tarjetas resumen y la tabla paginada.
 4. Pruebe filtros por nombre, centro, curso, estado, GPS y fecha.
 5. Cree un niño nuevo.

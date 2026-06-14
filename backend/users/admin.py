@@ -1,7 +1,26 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import Child, EducationalCenter, GPSDevice, Module, Permission, Role, RolePermission, Tutor, User
+from .models import (
+    Child,
+    ChildTutorAssociation,
+    ChildTutorAssociationHistory,
+    EducationalCenter,
+    GPSDevice,
+    MonitoringAlert,
+    MonitoringConfig,
+    MonitoringHistory,
+    Module,
+    Permission,
+    RiskZone,
+    Role,
+    RolePermission,
+    SafeArea,
+    SafeAreaHistory,
+    SecurityAlertHistory,
+    Tutor,
+    User,
+)
 
 
 @admin.register(User)
@@ -59,8 +78,8 @@ class RolePermissionAdmin(admin.ModelAdmin):
 
 @admin.register(EducationalCenter)
 class EducationalCenterAdmin(admin.ModelAdmin):
-    list_display = ("id", "code", "name", "is_active", "created_at")
-    search_fields = ("code", "name")
+    list_display = ("id", "code", "name", "phone", "regent", "is_active", "created_at", "updated_at")
+    search_fields = ("code", "name", "address", "phone", "email")
     list_filter = ("is_active",)
 
 
@@ -93,3 +112,71 @@ class TutorAdmin(admin.ModelAdmin):
     search_fields = ("nombres", "apellidos", "correo_electronico", "telefono")
     list_filter = ("estado", "cuenta_movil_estado", "parentesco")
     filter_horizontal = ("children",)
+
+
+@admin.register(ChildTutorAssociation)
+class ChildTutorAssociationAdmin(admin.ModelAdmin):
+    list_display = ("id", "child", "tutor", "is_active", "created_at", "updated_at")
+    search_fields = ("child__nombres", "child__apellidos", "tutor__nombres", "tutor__apellidos")
+    list_filter = ("is_active",)
+
+
+@admin.register(ChildTutorAssociationHistory)
+class ChildTutorAssociationHistoryAdmin(admin.ModelAdmin):
+    list_display = ("id", "association", "action", "user", "created_at")
+    search_fields = ("child__nombres", "tutor__nombres", "detail")
+    list_filter = ("action",)
+
+
+@admin.register(SafeArea)
+class SafeAreaAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "educational_center", "status", "area_m2", "perimeter_m", "updated_at")
+    search_fields = ("name", "educational_center__name", "educational_center__code")
+    list_filter = ("status", "is_active")
+
+
+@admin.register(SafeAreaHistory)
+class SafeAreaHistoryAdmin(admin.ModelAdmin):
+    list_display = ("id", "safe_area", "educational_center", "action", "points_count", "user", "created_at")
+    search_fields = ("safe_area__name", "educational_center__name", "user__nombre")
+    list_filter = ("action", "created_at")
+
+
+@admin.register(MonitoringAlert)
+class MonitoringAlertAdmin(admin.ModelAdmin):
+    list_display = ("id", "code", "child", "alert_type", "priority", "workflow_status", "detected_at")
+    search_fields = ("code", "child__nombres", "child__apellidos", "title", "description")
+    list_filter = ("alert_type", "priority", "workflow_status", "educational_center")
+
+
+@admin.register(SecurityAlertHistory)
+class SecurityAlertHistoryAdmin(admin.ModelAdmin):
+    list_display = ("id", "alert", "action", "previous_status", "new_status", "changed_by", "changed_at")
+    search_fields = ("alert__code", "comment", "changed_by__nombre")
+    list_filter = ("action", "new_status")
+
+
+@admin.register(MonitoringHistory)
+class MonitoringHistoryAdmin(admin.ModelAdmin):
+    list_display = ("id", "child", "status", "risk_zone", "created_at")
+    search_fields = ("child__nombres", "child__apellidos", "reason")
+    list_filter = ("status", "risk_zone")
+
+
+@admin.register(MonitoringConfig)
+class MonitoringConfigAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "min_time_between_alerts_min",
+        "min_distance_state_change_m",
+        "max_gps_accuracy_m",
+        "enable_risk_zones",
+        "updated_at",
+    )
+
+
+@admin.register(RiskZone)
+class RiskZoneAdmin(admin.ModelAdmin):
+    list_display = ("id", "code", "name", "educational_center", "risk_type", "severity", "is_active", "updated_at")
+    search_fields = ("code", "name", "educational_center__name")
+    list_filter = ("risk_type", "severity", "is_active")
