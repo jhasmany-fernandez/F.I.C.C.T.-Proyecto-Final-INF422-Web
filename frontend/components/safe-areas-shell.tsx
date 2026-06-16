@@ -189,7 +189,7 @@ export function SafeAreasShell() {
     setLoading(true);
     try {
       const [centersData, statsData] = await Promise.all([getEducationalCenters(), getSafeAreaStats()]);
-      const parsedCenters = centersData as EducationalCenter[];
+      const parsedCenters = Array.isArray(centersData) ? centersData : centersData.results ?? [];
       setCenters(parsedCenters);
       setStats(statsData);
 
@@ -528,7 +528,7 @@ export function SafeAreasShell() {
                 <p className="text-sm uppercase tracking-[0.25em] text-sky">Mapa Local</p>
                 <h3 className="mt-2 text-2xl font-bold text-slate-900">Editor de polígono GeoJSON</h3>
                 <p className="mt-2 text-sm text-slate-600">
-                  Entorno de prueba por localhost. El mapa es simulado en SVG y valida contra `http://127.0.0.1:8787`.
+                  Entorno de prueba sobre IP publica. El mapa es simulado en SVG y valida contra `http://35.238.201.88:8787`.
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -744,7 +744,7 @@ export function SafeAreasShell() {
                 <h3 className="text-xl font-bold text-slate-900">Observaciones locales</h3>
               </div>
               <ul className="mt-4 space-y-3 text-sm text-slate-600">
-                <li>Se valida solo por `localhost` y no por IP pública.</li>
+                <li>Se valida contra la IP pública `35.238.201.88` además del entorno local.</li>
                 <li>El editor usa una vista SVG simulada, suficiente para CRUD y validación GeoJSON.</li>
                 <li>El backend exige coordenadas `[longitud, latitud]`, polígono cerrado y área mayor a 0.</li>
               </ul>

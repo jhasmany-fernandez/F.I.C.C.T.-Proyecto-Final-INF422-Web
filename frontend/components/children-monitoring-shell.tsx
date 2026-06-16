@@ -144,7 +144,7 @@ export function ChildrenMonitoringShell() {
         getGpsDevices(),
         getChildrenStats(),
       ]);
-      setCenters(centersData);
+      setCenters(Array.isArray(centersData) ? centersData : centersData.results ?? []);
       setGpsDevices(gpsData);
       setStats(statsData);
     } catch (error) {
@@ -165,7 +165,8 @@ export function ChildrenMonitoringShell() {
       setChildrenData(data);
 
       if (data.results.length > 0) {
-        const childId = selectedChild && data.results.some((child) => child.id === selectedChild.id) ? selectedChild.id : data.results[0].id;
+        const childId =
+          selectedChild && data.results.some((child: Child) => child.id === selectedChild.id) ? selectedChild.id : data.results[0].id;
         const detail = await getChildById(childId);
         setSelectedChild(detail);
       } else {
@@ -474,7 +475,7 @@ export function ChildrenMonitoringShell() {
                 {loading ? (
                   <tr><td colSpan={11} className="py-8 text-center text-slate-500">Cargando niños monitoreados...</td></tr>
                 ) : childrenData?.results.length ? (
-                  childrenData.results.map((child) => (
+                  childrenData.results.map((child: Child) => (
                     <tr key={child.id} className="text-slate-700">
                       <td className="py-4">
                         {child.foto_url ? (

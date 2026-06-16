@@ -30,7 +30,7 @@ import {
   getEducationalCenterById,
   getEducationalCenterStats,
   getEducationalCenters,
-  getRegents,
+  getRegentOptions,
   updateEducationalCenter,
   updateEducationalCenterStatus,
 } from "@/lib/api";
@@ -140,7 +140,7 @@ export function EducationalCentersShell() {
 
   async function loadCatalogs() {
     try {
-      const [statsData, regentsData] = await Promise.all([getEducationalCenterStats(), getRegents()]);
+      const [statsData, regentsData] = await Promise.all([getEducationalCenterStats(), getRegentOptions()]);
       setStats(statsData);
       setRegents(regentsData);
     } catch (error) {

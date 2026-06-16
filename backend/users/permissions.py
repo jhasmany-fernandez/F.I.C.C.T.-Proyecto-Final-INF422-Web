@@ -12,7 +12,7 @@ class IsAdminRole(BasePermission):
             user
             and user.is_authenticated
             and user.is_active
-            and (user.rol == UserRole.ADMIN or (user.role and user.role.name.strip().lower() == "administrador"))
+            and user.is_admin_user
         )
 
 
@@ -39,4 +39,17 @@ class IsMonitoringRole(BasePermission):
             and user.is_authenticated
             and user.is_active
             and user.rol in {UserRole.ADMIN, UserRole.TUTOR, UserRole.REGENTE}
+        )
+
+
+class IsAdminOrRegentRole(BasePermission):
+    message = "No tiene permisos para acceder a estudiantes."
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user
+            and user.is_authenticated
+            and user.is_active
+            and user.rol in {UserRole.ADMIN, UserRole.REGENTE}
         )

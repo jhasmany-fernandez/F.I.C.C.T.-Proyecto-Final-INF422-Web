@@ -1,6 +1,8 @@
 services:
   db:
-    image: postgres:16-alpine
+    build:
+      context: ./db
+      dockerfile: Dockerfile
     container_name: sistema_escolar_db
     environment:
       POSTGRES_DB: sistema_escolar

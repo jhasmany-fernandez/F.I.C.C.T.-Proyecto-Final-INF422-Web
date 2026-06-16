@@ -250,7 +250,7 @@ export function TutorsShell() {
       cuenta_movil_estado: tutor.cuenta_movil_estado,
       correo_acceso: tutor.mobile_account.correo_acceso || tutor.correo_electronico,
       motivo_desactivacion: tutor.motivo_desactivacion,
-      child_ids: tutor.children.map((child) => child.id),
+      child_ids: tutor.children.map((child: Child) => child.id),
       childSearch: "",
     });
     setErrorMessage("");
@@ -609,13 +609,25 @@ export function TutorsShell() {
                             <Eye className="h-4 w-4" />
                           </button>
                           <button
-                            onClick={() => selectedTutor?.id === tutor.id ? openEdit(selectedTutor) : void openTutorDetail(tutor.id)}
+                            onClick={() => {
+                              if (selectedTutor && selectedTutor.id === tutor.id) {
+                                openEdit(selectedTutor);
+                                return;
+                              }
+                              void openTutorDetail(tutor.id);
+                            }}
                             className="rounded-xl border border-slate-200 p-2 text-slate-600"
                           >
                             <Pencil className="h-4 w-4" />
                           </button>
                           <button
-                            onClick={() => selectedTutor?.id === tutor.id ? openAssociateChildren(selectedTutor) : void openTutorDetail(tutor.id)}
+                            onClick={() => {
+                              if (selectedTutor && selectedTutor.id === tutor.id) {
+                                openAssociateChildren(selectedTutor);
+                                return;
+                              }
+                              void openTutorDetail(tutor.id);
+                            }}
                             className="rounded-xl border border-slate-200 p-2 text-slate-600"
                           >
                             <Users2 className="h-4 w-4" />
@@ -623,6 +635,9 @@ export function TutorsShell() {
                           <button
                             onClick={async () => {
                               const detail = selectedTutor?.id === tutor.id ? selectedTutor : await getTutorById(tutor.id);
+                              if (!detail) {
+                                return;
+                              }
                               setStatusTarget(detail);
                               setFormState((current) => ({ ...current, motivo_desactivacion: detail.motivo_desactivacion || "" }));
                             }}
@@ -732,7 +747,7 @@ export function TutorsShell() {
 
                 {detailTab === "children" && (
                   <div className="mt-6 space-y-3">
-                    {selectedTutor.children.map((child) => (
+                    {selectedTutor.children.map((child: Child) => (
                       <article key={child.id} className="rounded-2xl border border-slate-100 p-4 text-sm text-slate-600">
                         <p className="font-semibold text-slate-900">{child.nombre_completo}</p>
                         <p>{child.curso}</p>

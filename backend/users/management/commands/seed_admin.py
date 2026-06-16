@@ -14,6 +14,7 @@ from users.models import (
     ChildTutorAssociationAction,
     EducationalCenter,
     GPSDevice,
+    GPSDeviceStatus,
     MonitoringConfig,
     MobileAccountStatus,
     Module,
@@ -29,6 +30,9 @@ from users.models import (
     SafeAreaHistory,
     SafeAreaHistoryAction,
     SafeAreaStatus,
+    StudentGender,
+    StudentLevel,
+    StudentShift,
     Tutor,
     TutorStatus,
     UserRole,
@@ -78,24 +82,23 @@ EDUCATIONAL_CENTERS = [
 ]
 
 GPS_DEVICES = [
-    ("GPS-001", "Teltonika FMB920", "860000000001111"),
-    ("GPS-002", "Coban TK303G", "860000000002222"),
-    ("GPS-003", "Queclink GV300", "860000000003333"),
-    ("GPS-004", "Concox GT06N", "860000000004444"),
-    ("GPS-005", "Jimi IoT VL802", "860000000005555"),
-    ("GPS-006", "Teltonika TMT250", "860000000006666"),
+    ("GPS-001", "SER-001", "860000000001111", "70000001", "Teltonika", "FMB920", GPSDeviceStatus.ASIGNADO, 78, -17.783320, -63.182100, True),
+    ("GPS-002", "SER-002", "860000000002222", "70000002", "Coban", "TK303G", GPSDeviceStatus.DISPONIBLE, 18, -17.784100, -63.181200, True),
+    ("GPS-003", "SER-003", "860000000003333", "70000003", "Queclink", "GV300", GPSDeviceStatus.DISPONIBLE, 56, -17.781450, -63.180150, True),
+    ("GPS-004", "SER-004", "860000000004444", "70000004", "Concox", "GT06N", GPSDeviceStatus.EN_MANTENIMIENTO, 34, None, None, True),
+    ("GPS-005", "SER-005", "860000000005555", "70000005", "Jimi IoT", "VL802", GPSDeviceStatus.ASIGNADO, 15, -17.785200, -63.183410, True),
+    ("GPS-006", "SER-006", "860000000006666", "", "Teltonika", "TMT250", GPSDeviceStatus.PERDIDO, 5, None, None, True),
 ]
 
 CHILDREN = [
-    ("María", "Fernández López", date(2016, 4, 12), "5to Primaria", "CE-001", "GPS-001", ChildStatus.ACTIVO, ""),
-    ("José", "Vargas Núñez", date(2015, 8, 3), "6to Primaria", "CE-001", "GPS-002", ChildStatus.ACTIVO, ""),
-    ("Camila", "Rojas Pérez", date(2017, 2, 22), "4to Primaria", "CE-002", "GPS-003", ChildStatus.ACTIVO, ""),
-    ("Diego", "Mamani Flores", date(2014, 11, 17), "1ro Secundaria", "CE-002", None, ChildStatus.ACTIVO, ""),
-    ("Luciana", "Guzmán Salazar", date(2016, 7, 9), "5to Primaria", "CE-003", None, ChildStatus.INACTIVO, "Cambio temporal de institución."),
-    ("Mateo", "Suárez Rocha", date(2015, 12, 1), "6to Primaria", "CE-003", "GPS-004", ChildStatus.INACTIVO, "Mantenimiento preventivo del servicio."),
-    ("Valentina", "Paredes Arias", date(2017, 5, 30), "4to Primaria", "CE-001", "GPS-005", ChildStatus.ACTIVO, ""),
-    ("Thiago", "Quispe Molina", date(2014, 9, 14), "1ro Secundaria", "CE-002", None, ChildStatus.INACTIVO, "Solicitud administrativa."),
-    ("Lucas", "Mendoza Pardo", date(2016, 1, 11), "5to Primaria", "CE-003", "GPS-006", ChildStatus.ACTIVO, ""),
+    ("María", "Fernández López", date(2016, 4, 12), StudentGender.FEMENINO, "CI-0001", "RUDE-0001", "5to", "A", StudentLevel.PRIMARIA, StudentShift.MANANA, "Barrio Norte 101", "70010001", "Rosa Fernández", "72100001", "CE-001", "GPS-001", ChildStatus.ACTIVO, ""),
+    ("José", "Vargas Núñez", date(2015, 8, 3), StudentGender.MASCULINO, "CI-0002", "RUDE-0002", "6to", "B", StudentLevel.PRIMARIA, StudentShift.MANANA, "Barrio Norte 102", "70010002", "Carlos Vargas", "72100002", "CE-001", None, ChildStatus.ACTIVO, ""),
+    ("Camila", "Rojas Pérez", date(2017, 2, 22), StudentGender.FEMENINO, "CI-0003", "RUDE-0003", "4to", "A", StudentLevel.PRIMARIA, StudentShift.TARDE, "Plan 3000 45", "70010003", "Ana Rojas", "72100003", "CE-002", "GPS-002", ChildStatus.ACTIVO, ""),
+    ("Diego", "Mamani Flores", date(2014, 11, 17), StudentGender.MASCULINO, "CI-0004", "RUDE-0004", "1ro", "C", StudentLevel.SECUNDARIA, StudentShift.TARDE, "Villa Primero de Mayo", "70010004", "Luis Mamani", "72100004", "CE-002", None, ChildStatus.ACTIVO, ""),
+    ("Luciana", "Guzmán Salazar", date(2016, 7, 9), StudentGender.FEMENINO, "CI-0005", "RUDE-0005", "5to", "B", StudentLevel.PRIMARIA, StudentShift.MANANA, "Av. Busch 120", "70010005", "Marta Guzmán", "72100005", "CE-003", None, ChildStatus.INACTIVO, "Cambio temporal de institución."),
+    ("Mateo", "Suárez Rocha", date(2015, 12, 1), StudentGender.MASCULINO, "CI-0006", "RUDE-0006", "6to", "A", StudentLevel.PRIMARIA, StudentShift.NOCHE, "Zona Sur 12", "70010006", "Patricia Suárez", "72100006", "CE-003", None, ChildStatus.INACTIVO, "Mantenimiento preventivo del servicio."),
+    ("Valentina", "Paredes Arias", date(2017, 5, 30), StudentGender.FEMENINO, "CI-0007", "RUDE-0007", "4to", "C", StudentLevel.PRIMARIA, StudentShift.MANANA, "Av. Alemana 300", "70010007", "Laura Paredes", "72100007", "CE-001", "GPS-005", ChildStatus.ACTIVO, ""),
+    ("Thiago", "Quispe Molina", date(2014, 9, 14), StudentGender.MASCULINO, "CI-0008", "RUDE-0008", "1ro", "B", StudentLevel.SECUNDARIA, StudentShift.TARDE, "Distrito 8", "70010008", "Patricia Quispe", "72100008", "CE-002", None, ChildStatus.INACTIVO, "Solicitud administrativa."),
 ]
 
 TUTORS = [
@@ -104,7 +107,7 @@ TUTORS = [
     ("Ana", "Torres Díaz", "ana.torres@gmail.com", "765 222 111", "Zona Norte 12", "Abuela", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "ana.torres@gmail.com", [3]),
     ("Laura", "Gómez Salazar", "laura.gomez@gmail.com", "700 111 999", "Barrio Central 55", "Tía", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "laura.gomez@gmail.com", [4, 7]),
     ("José", "Martínez Vargas", "jose.martinez@gmail.com", "733 888 000", "Av. Integración 80", "Padre", TutorStatus.INACTIVO, MobileAccountStatus.INACTIVA, "jose.martinez@gmail.com", [5]),
-    ("Patricia", "Herrera Castillo", "patricia.herrera@gmail.com", "744 333 222", "Zona Sur 9", "Madre", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "patricia.herrera@gmail.com", [6, 8, 9]),
+    ("Patricia", "Herrera Castillo", "patricia.herrera@gmail.com", "744 333 222", "Zona Sur 9", "Madre", TutorStatus.ACTIVO, MobileAccountStatus.ACTIVA, "patricia.herrera@gmail.com", [6, 8]),
     ("Miguel", "Sánchez Rojas", "miguel.sanchez@gmail.com", "711 222 444", "Villa Esperanza 21", "Tutor Legal", TutorStatus.ACTIVO, MobileAccountStatus.SIN_CUENTA, "", [3]),
 ]
 
@@ -338,27 +341,72 @@ class Command(BaseCommand):
 
     def _seed_devices(self):
         devices: dict[str, GPSDevice] = {}
-        for code, model, imei in GPS_DEVICES:
+        for code, serial_number, imei, phone_number, brand, model, status, battery_level, latitude, longitude, is_active in GPS_DEVICES:
             device, _ = GPSDevice.objects.update_or_create(
                 code=code,
-                defaults={"model": model, "imei": imei, "is_active": True},
+                defaults={
+                    "serial_number": serial_number,
+                    "imei": imei,
+                    "phone_number": phone_number or None,
+                    "brand": brand,
+                    "model": model,
+                    "status": status,
+                    "battery_level": battery_level,
+                    "last_latitude": latitude,
+                    "last_longitude": longitude,
+                    "is_active": is_active,
+                },
             )
             devices[code] = device
         return devices
 
     def _seed_children(self, centers: dict[str, EducationalCenter], devices: dict[str, GPSDevice]):
-        for index, (nombres, apellidos, fecha_nacimiento, curso, center_code, gps_code, status, motivo) in enumerate(CHILDREN, start=1):
+        admin_user = User.objects.filter(email="admin@colegio.com").first()
+        for index, child_data in enumerate(CHILDREN, start=1):
+            (
+                nombres,
+                apellidos,
+                fecha_nacimiento,
+                genero,
+                ci,
+                rude,
+                curso,
+                paralelo,
+                nivel,
+                turno,
+                direccion,
+                telefono_contacto,
+                nombre_contacto_emergencia,
+                telefono_contacto_emergencia,
+                center_code,
+                gps_code,
+                status,
+                motivo,
+            ) = child_data
             Child.objects.update_or_create(
                 code=f"NIN-{index:04d}",
                 defaults={
                     "nombres": nombres,
                     "apellidos": apellidos,
                     "fecha_nacimiento": fecha_nacimiento,
+                    "genero": genero,
+                    "ci": ci,
+                    "rude": rude,
                     "curso": curso,
+                    "paralelo": paralelo,
+                    "nivel": nivel,
+                    "turno": turno,
+                    "direccion": direccion,
+                    "telefono_contacto": telefono_contacto,
+                    "nombre_contacto_emergencia": nombre_contacto_emergencia,
+                    "telefono_contacto_emergencia": telefono_contacto_emergencia,
                     "centro_educativo": centers[center_code],
                     "dispositivo_gps": devices.get(gps_code) if gps_code else None,
                     "status": status,
                     "motivo_desactivacion": motivo,
+                    "desactivado_en": timezone.now() if status == ChildStatus.INACTIVO else None,
+                    "created_by": admin_user,
+                    "updated_by": admin_user,
                 },
             )
 

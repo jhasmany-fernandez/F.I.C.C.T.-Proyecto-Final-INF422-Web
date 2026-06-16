@@ -413,7 +413,7 @@ export function RolesPermissionsShell() {
                           </button>
                           <button
                             onClick={() => {
-                              if (selectedRole?.id === role.id) {
+                              if (selectedRole && selectedRole.id === role.id) {
                                 openEdit(selectedRole);
                               } else {
                                 void authRequest<RoleDetail>(`/roles/${role.id}/`).then((detail) => {

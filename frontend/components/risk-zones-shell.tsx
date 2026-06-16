@@ -257,7 +257,7 @@ export function RiskZonesShell() {
     setLoading(true);
     try {
       const [centersData, statsData] = await Promise.all([getEducationalCenters(), getRiskZoneStats()]);
-      setCenters(centersData as EducationalCenter[]);
+      setCenters(Array.isArray(centersData) ? centersData : centersData.results ?? []);
       setStats(statsData);
       await loadZones();
     } catch (error) {

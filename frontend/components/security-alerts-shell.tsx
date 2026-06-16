@@ -126,9 +126,7 @@ export function SecurityAlertsShell() {
         getEducationalCenters(),
       ]);
       setStats(statsData);
-      if (Array.isArray(centersData)) {
-        setCenters(centersData);
-      }
+      setCenters(Array.isArray(centersData) ? centersData : centersData.results ?? []);
     } catch (error) {
       handleApiError(error);
     }
@@ -568,22 +566,25 @@ export function SecurityAlertsShell() {
               <div key={group.label}>
                 <p className="text-sm font-semibold text-slate-700">{group.label}</p>
                 <div className="mt-3 space-y-3">
-                  {Object.entries(group.values).map(([key, value]) => (
-                    <div key={key}>
-                      <div className="flex items-center justify-between text-xs text-slate-500">
-                        <span>{key}</span>
-                        <span>{value}</span>
+                  {Object.entries(group.values).map(([key, value]) => {
+                    const numericValue = typeof value === "number" ? value : Number(value) || 0;
+                    return (
+                      <div key={key}>
+                        <div className="flex items-center justify-between text-xs text-slate-500">
+                          <span>{key}</span>
+                          <span>{String(numericValue)}</span>
+                        </div>
+                        <div className="mt-1 h-3 rounded-full bg-slate-100">
+                          <div
+                            className="h-3 rounded-full bg-gradient-to-r from-sky to-navy"
+                            style={{
+                              width: `${stats && stats.total_30_days > 0 ? Math.max(8, (numericValue / stats.total_30_days) * 100) : 0}%`,
+                            }}
+                          />
+                        </div>
                       </div>
-                      <div className="mt-1 h-3 rounded-full bg-slate-100">
-                        <div
-                          className="h-3 rounded-full bg-gradient-to-r from-sky to-navy"
-                          style={{
-                            width: `${stats && stats.total_30_days > 0 ? Math.max(8, (value / stats.total_30_days) * 100) : 0}%`,
-                          }}
-                        />
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ))}

@@ -1,5 +1,7 @@
 from datetime import date
 
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Max
 from rest_framework import serializers
@@ -7,11 +9,19 @@ from rest_framework import serializers
 from .models import (
     Child,
     ChildStatus,
+    StudentGender,
+    StudentHistory,
+    StudentHistoryAction,
+    StudentLevel,
+    StudentShift,
     ChildTutorAssociation,
     ChildTutorAssociationAction,
     ChildTutorAssociationHistory,
     EducationalCenter,
     GPSDevice,
+    GPSDeviceHistory,
+    GPSDeviceHistoryAction,
+    GPSDeviceStatus,
     MobileAccountStatus,
     Module,
     Permission,
@@ -43,6 +53,138 @@ from .models import (
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
     password = serializers.CharField(required=True, write_only=True, trim_whitespace=False)
+
+
+def map_role_name_to_user_role(role: Role | None) -> str | None:
+    if role is None:
+        return None
+
+    normalized = role.name.strip().lower()
+    if normalized == "administrador":
+        return UserRole.ADMIN
+    if normalized == "regente":
+        return UserRole.REGENTE
+    if normalized == "tutor":
+        return UserRole.TUTOR
+    return None
+
+
+class UserListSerializer(serializers.ModelSerializer):
+    apellidos = serializers.CharField(source="last_name", read_only=True)
+    role = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "email",
+            "nombre",
+            "apellidos",
+            "rol",
+            "role",
+            "is_active",
+            "date_joined",
+            "last_login",
+        )
+
+    def get_role(self, obj: User):
+        role_name = obj.role_name
+        if not obj.role_id or role_name is None:
+            return None
+        return {"id": obj.role_id, "name": role_name}
+
+
+class UserDetailSerializer(UserListSerializer):
+    class Meta(UserListSerializer.Meta):
+        fields = UserListSerializer.Meta.fields
+
+
+class UserWriteSerializer(serializers.ModelSerializer):
+    apellidos = serializers.CharField(source="last_name", required=False, allow_blank=True)
+    role_id = serializers.IntegerField(write_only=True, required=True)
+    password = serializers.CharField(required=False, allow_blank=True, write_only=True, trim_whitespace=False)
+
+    class Meta:
+        model = User
+        fields = ("email", "nombre", "apellidos", "role_id", "is_active", "password")
+
+    def validate_email(self, value: str):
+        normalized = value.strip().lower()
+        if not normalized:
+            raise serializers.ValidationError("El correo electrónico es obligatorio.")
+
+        queryset = User.objects.filter(email__iexact=normalized)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un usuario con ese correo electrónico.")
+        return normalized
+
+    def validate_nombre(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("El nombre es obligatorio.")
+        return value
+
+    def validate_role_id(self, value: int):
+        role = Role.objects.filter(pk=value, is_active=True).first()
+        if not role or map_role_name_to_user_role(role) is None:
+            raise serializers.ValidationError("Rol inválido.")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        password = attrs.get("password")
+
+        if self.instance is None and not password:
+            raise serializers.ValidationError({"password": ["La contraseña es obligatoria al crear."]})
+
+        if password:
+            try:
+                validate_password(password, self.instance)
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError({"password": list(exc.messages)}) from exc
+
+        return attrs
+
+    def create(self, validated_data):
+        role_id = validated_data.pop("role_id")
+        password = validated_data.pop("password")
+        role = Role.objects.get(pk=role_id)
+
+        user = User(
+            email=validated_data["email"],
+            username=validated_data["email"],
+            nombre=validated_data["nombre"],
+            last_name=validated_data.get("last_name", ""),
+            role=role,
+            is_active=validated_data.get("is_active", True),
+        )
+        user.set_password(password)
+        user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        role_id = validated_data.pop("role_id")
+        password = validated_data.pop("password", "")
+        role = Role.objects.get(pk=role_id)
+
+        instance.email = validated_data["email"]
+        instance.username = validated_data["email"]
+        instance.nombre = validated_data["nombre"]
+        instance.last_name = validated_data.get("last_name", "")
+        instance.role = role
+        instance.is_active = validated_data.get("is_active", instance.is_active)
+
+        if password:
+            instance.set_password(password)
+
+        instance.save()
+        return instance
+
+
+class UserStatusSerializer(serializers.Serializer):
+    is_active = serializers.BooleanField()
 
 
 class ModuleSerializer(serializers.ModelSerializer):
@@ -208,6 +350,178 @@ class RegentOptionSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ("id", "full_name", "email")
+
+
+class RegentEducationalCenterSerializer(serializers.ModelSerializer):
+    district = serializers.SerializerMethodField()
+    regent_id = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = EducationalCenter
+        fields = ("id", "code", "name", "address", "district", "is_active", "regent_id")
+
+    def get_district(self, obj: EducationalCenter):
+        return ""
+
+
+class RegentListSerializer(serializers.ModelSerializer):
+    apellidos = serializers.CharField(source="last_name", read_only=True)
+    role = serializers.SerializerMethodField()
+    educational_center = serializers.SerializerMethodField()
+    centro_educativo = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "email",
+            "nombre",
+            "apellidos",
+            "rol",
+            "role",
+            "is_active",
+            "educational_center",
+            "centro_educativo",
+            "date_joined",
+            "last_login",
+        )
+
+    def _get_center(self, obj: User):
+        prefetched = getattr(obj, "_prefetched_objects_cache", {})
+        if "assigned_educational_centers" in prefetched:
+            centers = prefetched["assigned_educational_centers"]
+            return centers[0] if centers else None
+        return obj.assigned_educational_centers.order_by("name").first()
+
+    def get_role(self, obj: User):
+        role_name = obj.role_name
+        if not obj.role_id or role_name is None:
+            return None
+        return {"id": obj.role_id, "name": role_name}
+
+    def get_educational_center(self, obj: User):
+        center = self._get_center(obj)
+        return RegentEducationalCenterSerializer(center).data if center else None
+
+    def get_centro_educativo(self, obj: User):
+        return self.get_educational_center(obj)
+
+
+class RegentDetailSerializer(RegentListSerializer):
+    class Meta(RegentListSerializer.Meta):
+        fields = RegentListSerializer.Meta.fields
+
+
+class RegentWriteSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+    nombre = serializers.CharField(required=True, allow_blank=False)
+    apellidos = serializers.CharField(required=True, allow_blank=False)
+    is_active = serializers.BooleanField(required=False, default=True)
+    password = serializers.CharField(required=False, allow_blank=True, write_only=True, trim_whitespace=False)
+    educational_center_id = serializers.IntegerField(required=True)
+
+    def validate_email(self, value: str):
+        normalized = value.strip().lower()
+        queryset = User.objects.filter(email__iexact=normalized)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un usuario con ese correo electrónico.")
+        return normalized
+
+    def validate_nombre(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("El nombre es obligatorio.")
+        return value
+
+    def validate_apellidos(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Los apellidos son obligatorios.")
+        return value
+
+    def validate_educational_center_id(self, value: int):
+        center = EducationalCenter.objects.filter(pk=value).first()
+        if not center:
+            raise serializers.ValidationError("Centro educativo inexistente.")
+        if not center.is_active:
+            raise serializers.ValidationError("El centro educativo debe estar activo.")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        password = attrs.get("password")
+
+        if self.instance is None and not password:
+            raise serializers.ValidationError({"password": ["La contraseña es obligatoria al crear."]})
+
+        if password:
+            try:
+                validate_password(password, self.instance)
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError({"password": list(exc.messages)}) from exc
+
+        return attrs
+
+    def _get_regent_role(self):
+        role = Role.objects.filter(name__iexact="Regente", is_active=True).first()
+        if not role:
+            raise serializers.ValidationError({"role": ["No existe un rol Regente activo configurado."]})
+        return role
+
+    def _assign_center(self, *, user: User, center_id: int):
+        current_centers = EducationalCenter.objects.filter(regent=user).exclude(pk=center_id)
+        if current_centers.exists():
+            current_centers.update(regent=None)
+
+        center = EducationalCenter.objects.get(pk=center_id)
+        if center.regent_id != user.id:
+            center.regent = user
+            center.save(update_fields=["regent", "updated_at"])
+
+    @transaction.atomic
+    def create(self, validated_data):
+        center_id = validated_data.pop("educational_center_id")
+        password = validated_data.pop("password")
+        role = self._get_regent_role()
+
+        user = User(
+            email=validated_data["email"],
+            username=validated_data["email"],
+            nombre=validated_data["nombre"],
+            last_name=validated_data["apellidos"],
+            role=role,
+            rol=UserRole.REGENTE,
+            is_active=validated_data.get("is_active", True),
+        )
+        user.set_password(password)
+        user.save()
+        self._assign_center(user=user, center_id=center_id)
+        return user
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        center_id = validated_data.pop("educational_center_id")
+        password = validated_data.pop("password", "")
+        role = self._get_regent_role()
+
+        instance.email = validated_data["email"]
+        instance.username = validated_data["email"]
+        instance.nombre = validated_data["nombre"]
+        instance.last_name = validated_data["apellidos"]
+        instance.role = role
+        instance.rol = UserRole.REGENTE
+        instance.is_active = validated_data.get("is_active", instance.is_active)
+        if password:
+            instance.set_password(password)
+        instance.save()
+        self._assign_center(user=instance, center_id=center_id)
+        return instance
+
+
+class RegentStatusSerializer(serializers.Serializer):
+    is_active = serializers.BooleanField()
 
 
 class EducationalCenterOptionSerializer(serializers.ModelSerializer):
@@ -470,12 +784,235 @@ class SafeAreaHistorySerializer(serializers.ModelSerializer):
 class SafeAreaPolygonPayloadSerializer(serializers.Serializer):
     polygon = serializers.JSONField(required=True)
 
+class GPSDeviceAssignedChildSerializer(serializers.ModelSerializer):
+    nombre_completo = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Child
+        fields = ("id", "code", "nombre_completo", "curso", "status")
+
+    def get_nombre_completo(self, obj: Child):
+        return f"{obj.nombres} {obj.apellidos}"
+
+
+class GPSDeviceHistorySerializer(serializers.ModelSerializer):
+    user = serializers.SerializerMethodField()
+    previous_child = GPSDeviceAssignedChildSerializer(read_only=True)
+    new_child = GPSDeviceAssignedChildSerializer(read_only=True)
+
+    class Meta:
+        model = GPSDeviceHistory
+        fields = (
+            "id",
+            "action",
+            "detail",
+            "previous_status",
+            "new_status",
+            "previous_child",
+            "new_child",
+            "previous_is_active",
+            "new_is_active",
+            "user",
+            "created_at",
+        )
+
+    def get_user(self, obj: GPSDeviceHistory):
+        return obj.user.nombre if obj.user else None
+
+
 class GPSDeviceSerializer(serializers.ModelSerializer):
+    assigned_child = serializers.SerializerMethodField()
     assignment_status = serializers.CharField(read_only=True)
+    created_by = serializers.SerializerMethodField()
+    updated_by = serializers.SerializerMethodField()
 
     class Meta:
         model = GPSDevice
-        fields = ("id", "code", "model", "imei", "is_active", "assignment_status")
+        fields = (
+            "id",
+            "code",
+            "serial_number",
+            "imei",
+            "phone_number",
+            "brand",
+            "model",
+            "status",
+            "battery_level",
+            "last_latitude",
+            "last_longitude",
+            "last_seen_at",
+            "assigned_child",
+            "is_active",
+            "assignment_status",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+        )
+
+    def get_assigned_child(self, obj: GPSDevice):
+        child = obj.assigned_child
+        return GPSDeviceAssignedChildSerializer(child).data if child else None
+
+    def get_created_by(self, obj: GPSDevice):
+        return obj.created_by.nombre if obj.created_by else None
+
+    def get_updated_by(self, obj: GPSDevice):
+        return obj.updated_by.nombre if obj.updated_by else None
+
+
+class GPSDeviceWriteSerializer(serializers.ModelSerializer):
+    assigned_child_id = serializers.PrimaryKeyRelatedField(
+        queryset=Child.objects.filter(status=ChildStatus.ACTIVO),
+        required=False,
+        allow_null=True,
+        source="assigned_child",
+    )
+
+    class Meta:
+        model = GPSDevice
+        fields = (
+            "code",
+            "serial_number",
+            "imei",
+            "phone_number",
+            "brand",
+            "model",
+            "status",
+            "battery_level",
+            "last_latitude",
+            "last_longitude",
+            "last_seen_at",
+            "assigned_child_id",
+            "is_active",
+        )
+
+    def validate_code(self, value: str):
+        value = value.strip().upper()
+        queryset = GPSDevice.objects.filter(code__iexact=value)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un dispositivo con ese código.")
+        return value
+
+    def validate_serial_number(self, value: str):
+        value = value.strip().upper()
+        queryset = GPSDevice.objects.filter(serial_number__iexact=value)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un dispositivo con ese número de serie.")
+        return value
+
+    def validate_imei(self, value: str):
+        value = value.strip()
+        queryset = GPSDevice.objects.filter(imei=value)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un dispositivo con ese IMEI.")
+        return value
+
+    def validate_phone_number(self, value: str):
+        value = value.strip()
+        if not value:
+            return None
+        queryset = GPSDevice.objects.filter(phone_number=value)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un dispositivo con ese número telefónico.")
+        return value
+
+    def validate_brand(self, value: str):
+        return value.strip()
+
+    def validate_model(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("El modelo es obligatorio.")
+        return value
+
+    def validate_battery_level(self, value: int):
+        if value < 0 or value > 100:
+            raise serializers.ValidationError("El nivel de batería debe estar entre 0 y 100.")
+        return value
+
+    def validate_last_latitude(self, value):
+        if value is not None and (value < -90 or value > 90):
+            raise serializers.ValidationError("La latitud debe estar entre -90 y 90.")
+        return value
+
+    def validate_last_longitude(self, value):
+        if value is not None and (value < -180 or value > 180):
+            raise serializers.ValidationError("La longitud debe estar entre -180 y 180.")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        assigned_child = attrs.pop("assigned_child", None) if "assigned_child" in attrs else getattr(self.instance, "assigned_child", None)
+        status_value = attrs.get("status", getattr(self.instance, "status", GPSDeviceStatus.DISPONIBLE))
+        is_active = attrs.get("is_active", getattr(self.instance, "is_active", True))
+        last_latitude = attrs.get("last_latitude", getattr(self.instance, "last_latitude", None))
+        last_longitude = attrs.get("last_longitude", getattr(self.instance, "last_longitude", None))
+
+        if (last_latitude is None) ^ (last_longitude is None):
+            raise serializers.ValidationError("Debe registrar latitud y longitud juntas.")
+
+        if assigned_child and status_value != GPSDeviceStatus.ASIGNADO:
+            raise serializers.ValidationError({"status": ["Si el dispositivo tiene un niño asignado, el estado debe ser ASIGNADO."]})
+
+        if not assigned_child and status_value == GPSDeviceStatus.ASIGNADO:
+            raise serializers.ValidationError({"assigned_child_id": ["Debe asignar un niño activo para usar el estado ASIGNADO."]})
+
+        if not is_active and status_value != GPSDeviceStatus.INACTIVO:
+            raise serializers.ValidationError({"status": ["Un dispositivo inactivo debe tener estado INACTIVO."]})
+
+        if assigned_child:
+            assigned_device = getattr(assigned_child, "dispositivo_gps", None)
+            if assigned_device and (self.instance is None or assigned_device.pk != self.instance.pk):
+                raise serializers.ValidationError({"assigned_child_id": ["El niño ya tiene otro dispositivo GPS activo asignado."]})
+
+        attrs["assigned_child"] = assigned_child
+        return attrs
+
+    def _apply_child_assignment(self, *, device: GPSDevice, child: Child | None):
+        current_children = Child.objects.filter(dispositivo_gps=device).exclude(pk=child.pk if child else None)
+        current_children.update(dispositivo_gps=None)
+
+        if child and child.dispositivo_gps_id != device.id:
+            child.dispositivo_gps = device
+            child.save(update_fields=["dispositivo_gps", "fecha_actualizacion"])
+
+    def _assign_audit_user(self, device: GPSDevice):
+        request = self.context.get("request")
+        if request and getattr(request, "user", None) and request.user.is_authenticated:
+            if device.created_by_id is None:
+                device.created_by = request.user
+            device.updated_by = request.user
+
+    def create(self, validated_data):
+        assigned_child = validated_data.pop("assigned_child", None)
+        device = GPSDevice(**validated_data)
+        self._assign_audit_user(device)
+        device.save()
+        self._apply_child_assignment(device=device, child=assigned_child)
+        return device
+
+    def update(self, instance, validated_data):
+        assigned_child = validated_data.pop("assigned_child", instance.assigned_child)
+        for key, value in validated_data.items():
+            setattr(instance, key, value)
+        self._assign_audit_user(instance)
+        instance.save()
+        self._apply_child_assignment(device=instance, child=assigned_child)
+        return instance
+
+
+class GPSDeviceStatusSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=GPSDeviceStatus.choices)
+    is_active = serializers.BooleanField(required=False)
 
 
 class GeographicLocationRegisterSerializer(serializers.Serializer):
@@ -962,12 +1499,24 @@ class ChildWriteSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data.setdefault("status", ChildStatus.ACTIVO)
         validated_data["code"] = self._generate_code()
-        return super().create(validated_data)
+        child = super().create(validated_data)
+        if child.dispositivo_gps:
+            child.dispositivo_gps.status = GPSDeviceStatus.ASIGNADO
+            child.dispositivo_gps.save(update_fields=["status", "updated_at"])
+        return child
 
     def update(self, instance, validated_data):
+        previous_device = instance.dispositivo_gps
         if validated_data.get("status") == ChildStatus.ACTIVO:
             validated_data["motivo_desactivacion"] = ""
-        return super().update(instance, validated_data)
+        child = super().update(instance, validated_data)
+        if previous_device and previous_device != child.dispositivo_gps:
+            previous_device.sync_status_with_assignment()
+            previous_device.save(update_fields=["status", "updated_at"])
+        if child.dispositivo_gps:
+            child.dispositivo_gps.sync_status_with_assignment()
+            child.dispositivo_gps.save(update_fields=["status", "updated_at"])
+        return child
 
     def _generate_code(self) -> str:
         last = Child.objects.order_by("-id").first()
@@ -977,6 +1526,275 @@ class ChildWriteSerializer(serializers.ModelSerializer):
 
 class ChildStatusSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=ChildStatus.choices)
+    motivo_desactivacion = serializers.CharField(required=False, allow_blank=True, max_length=200)
+
+
+class StudentCenterSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EducationalCenter
+        fields = ("id", "code", "name")
+
+
+class StudentGpsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GPSDevice
+        fields = ("id", "code", "brand", "model", "status", "battery_level")
+
+
+class StudentHistorySerializer(serializers.ModelSerializer):
+    performed_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StudentHistory
+        fields = (
+            "id",
+            "action",
+            "description",
+            "previous_data",
+            "new_data",
+            "performed_by",
+            "created_at",
+        )
+
+    def get_performed_by(self, obj: StudentHistory):
+        return obj.performed_by.nombre if obj.performed_by else None
+
+
+class StudentListSerializer(serializers.ModelSerializer):
+    nombre_completo = serializers.CharField(read_only=True)
+    edad = serializers.IntegerField(read_only=True)
+    educational_center = StudentCenterSerializer(source="centro_educativo", read_only=True)
+    gps_device = StudentGpsSerializer(source="dispositivo_gps", read_only=True)
+    status = serializers.SerializerMethodField()
+    created_at = serializers.DateTimeField(source="fecha_registro", read_only=True)
+    updated_at = serializers.DateTimeField(source="fecha_actualizacion", read_only=True)
+
+    class Meta:
+        model = Child
+        fields = (
+            "id",
+            "code",
+            "nombres",
+            "apellidos",
+            "nombre_completo",
+            "fecha_nacimiento",
+            "edad",
+            "genero",
+            "ci",
+            "rude",
+            "curso",
+            "paralelo",
+            "nivel",
+            "turno",
+            "direccion",
+            "telefono_contacto",
+            "nombre_contacto_emergencia",
+            "telefono_contacto_emergencia",
+            "educational_center",
+            "gps_device",
+            "status",
+            "motivo_desactivacion",
+            "desactivado_en",
+            "deleted_at",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_status(self, obj: Child):
+        return obj.status.upper()
+
+
+class StudentDetailSerializer(StudentListSerializer):
+    deleted_by = serializers.SerializerMethodField()
+    created_by = serializers.SerializerMethodField()
+    updated_by = serializers.SerializerMethodField()
+
+    class Meta(StudentListSerializer.Meta):
+        fields = StudentListSerializer.Meta.fields + ("deleted_by", "created_by", "updated_by")
+
+    def get_deleted_by(self, obj: Child):
+        return obj.deleted_by.nombre if obj.deleted_by else None
+
+    def get_created_by(self, obj: Child):
+        return obj.created_by.nombre if obj.created_by else None
+
+    def get_updated_by(self, obj: Child):
+        return obj.updated_by.nombre if obj.updated_by else None
+
+
+class StudentWriteSerializer(serializers.ModelSerializer):
+    educational_center_id = serializers.PrimaryKeyRelatedField(
+        source="centro_educativo",
+        queryset=EducationalCenter.objects.all(),
+    )
+    gps_device_id = serializers.PrimaryKeyRelatedField(
+        source="dispositivo_gps",
+        queryset=GPSDevice.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    status = serializers.ChoiceField(choices=[("ACTIVO", "Activo"), ("INACTIVO", "Inactivo")], required=False)
+
+    class Meta:
+        model = Child
+        fields = (
+            "id",
+            "code",
+            "nombres",
+            "apellidos",
+            "fecha_nacimiento",
+            "genero",
+            "ci",
+            "rude",
+            "curso",
+            "paralelo",
+            "nivel",
+            "turno",
+            "direccion",
+            "telefono_contacto",
+            "nombre_contacto_emergencia",
+            "telefono_contacto_emergencia",
+            "educational_center_id",
+            "gps_device_id",
+            "status",
+            "motivo_desactivacion",
+        )
+
+    def validate_code(self, value: str):
+        value = value.strip().upper()
+        if not value:
+            raise serializers.ValidationError("El código es obligatorio.")
+        queryset = Child.objects.filter(code__iexact=value)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un estudiante con ese código.")
+        return value
+
+    def validate_nombres(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Los nombres son obligatorios.")
+        return value
+
+    def validate_apellidos(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Los apellidos son obligatorios.")
+        return value
+
+    def validate_fecha_nacimiento(self, value):
+        if value > date.today():
+            raise serializers.ValidationError("La fecha de nacimiento no puede ser futura.")
+        return value
+
+    def validate_ci(self, value: str | None):
+        if value in {None, ""}:
+            return None
+        normalized = value.strip().upper()
+        queryset = Child.objects.filter(ci__iexact=normalized)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un estudiante con ese CI.")
+        return normalized
+
+    def validate_rude(self, value: str | None):
+        if value in {None, ""}:
+            return None
+        normalized = value.strip().upper()
+        queryset = Child.objects.filter(rude__iexact=normalized)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un estudiante con ese RUDE.")
+        return normalized
+
+    def validate_curso(self, value: str):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("El curso es obligatorio.")
+        return value
+
+    def validate_paralelo(self, value: str):
+        return value.strip()
+
+    def validate_direccion(self, value: str):
+        return value.strip()
+
+    def validate_telefono_contacto(self, value: str):
+        return value.strip()
+
+    def validate_nombre_contacto_emergencia(self, value: str):
+        return value.strip()
+
+    def validate_telefono_contacto_emergencia(self, value: str):
+        return value.strip()
+
+    def validate_educational_center_id(self, value: EducationalCenter):
+        if not value.is_active:
+            raise serializers.ValidationError("El centro educativo debe estar activo.")
+        return value
+
+    def validate_gps_device_id(self, value: GPSDevice | None):
+        if value is None:
+            return value
+        if not value.is_active:
+            raise serializers.ValidationError("El dispositivo GPS debe estar activo.")
+        if value.status != GPSDeviceStatus.DISPONIBLE:
+            same_device = self.instance and self.instance.dispositivo_gps_id == value.id
+            if not same_device:
+                raise serializers.ValidationError("El dispositivo GPS debe estar disponible.")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        status_value = attrs.get("status")
+        device = attrs.get("dispositivo_gps", getattr(self.instance, "dispositivo_gps", None))
+
+        if status_value == "ACTIVO":
+            attrs["status"] = ChildStatus.ACTIVO
+            attrs["motivo_desactivacion"] = ""
+        elif status_value == "INACTIVO":
+            attrs["status"] = ChildStatus.INACTIVO
+        elif self.instance is None:
+            attrs["status"] = ChildStatus.ACTIVO
+
+        if device:
+            conflict = Child.objects.filter(dispositivo_gps=device, status=ChildStatus.ACTIVO, deleted_at__isnull=True)
+            if self.instance:
+                conflict = conflict.exclude(pk=self.instance.pk)
+            if conflict.exists():
+                raise serializers.ValidationError({"gps_device_id": ["El dispositivo GPS ya está asignado a otro estudiante activo."]})
+
+            same_device = self.instance and self.instance.dispositivo_gps_id == device.id
+            if not same_device and device.status != GPSDeviceStatus.DISPONIBLE:
+                raise serializers.ValidationError({"gps_device_id": ["El dispositivo GPS debe estar disponible."]})
+
+        return attrs
+
+    def create(self, validated_data):
+        student = super().create(validated_data)
+        if student.dispositivo_gps:
+            student.dispositivo_gps.status = GPSDeviceStatus.ASIGNADO
+            student.dispositivo_gps.save(update_fields=["status", "updated_at"])
+        return student
+
+    def update(self, instance, validated_data):
+        previous_device = instance.dispositivo_gps
+        student = super().update(instance, validated_data)
+
+        if previous_device and previous_device != student.dispositivo_gps:
+            previous_device.sync_status_with_assignment()
+            previous_device.save(update_fields=["status", "updated_at"])
+        if student.dispositivo_gps:
+            student.dispositivo_gps.sync_status_with_assignment()
+            student.dispositivo_gps.save(update_fields=["status", "updated_at"])
+        return student
+
+
+class StudentStatusSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=[("ACTIVO", "Activo"), ("INACTIVO", "Inactivo")])
     motivo_desactivacion = serializers.CharField(required=False, allow_blank=True, max_length=200)
 
 
@@ -1131,6 +1949,47 @@ class TutorWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Debe asociar al menos un niño.")
         return list(dict.fromkeys(value))
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        estado = attrs.get("estado", getattr(self.instance, "estado", TutorStatus.ACTIVO))
+        mobile_status = attrs.get(
+            "cuenta_movil_estado",
+            getattr(self.instance, "cuenta_movil_estado", MobileAccountStatus.SIN_CUENTA),
+        )
+
+        if estado == TutorStatus.INACTIVO and mobile_status == MobileAccountStatus.ACTIVA:
+            attrs["cuenta_movil_estado"] = MobileAccountStatus.INACTIVA
+
+        if mobile_status != MobileAccountStatus.SIN_CUENTA and not attrs.get(
+            "correo_acceso", getattr(self.instance, "correo_acceso", "")
+        ):
+            attrs["correo_acceso"] = attrs.get("correo_electronico", getattr(self.instance, "correo_electronico", ""))
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        child_ids = validated_data.pop("child_ids")
+        request = self.context.get("request")
+        tutor = Tutor.objects.create(
+            creado_por=getattr(request, "user", None),
+            actualizado_por=getattr(request, "user", None),
+            **validated_data,
+        )
+        tutor.children.set(Child.objects.filter(id__in=child_ids))
+        return tutor
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        child_ids = validated_data.pop("child_ids")
+        request = self.context.get("request")
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.actualizado_por = getattr(request, "user", None)
+        instance.save()
+        instance.children.set(Child.objects.filter(id__in=child_ids))
+        return instance
+
 
 class ChildTutorAssociationChildSerializer(serializers.ModelSerializer):
     nombre_completo = serializers.SerializerMethodField()
@@ -1248,56 +2107,6 @@ class ChildTutorAssociationCreateSerializer(serializers.Serializer):
         attrs["child"] = child
         attrs["tutors"] = tutors
         return attrs
-
-    def validate_estado(self, value: str):
-        if value not in {TutorStatus.ACTIVO, TutorStatus.INACTIVO}:
-            raise serializers.ValidationError("Estado inválido.")
-        return value
-
-    def validate_cuenta_movil_estado(self, value: str):
-        if value not in {MobileAccountStatus.ACTIVA, MobileAccountStatus.INACTIVA, MobileAccountStatus.SIN_CUENTA}:
-            raise serializers.ValidationError("Estado de cuenta móvil inválido.")
-        return value
-
-    def validate(self, attrs):
-        estado = attrs.get("estado", getattr(self.instance, "estado", TutorStatus.ACTIVO))
-        mobile_status = attrs.get(
-            "cuenta_movil_estado",
-            getattr(self.instance, "cuenta_movil_estado", MobileAccountStatus.SIN_CUENTA),
-        )
-
-        if estado == TutorStatus.INACTIVO and mobile_status == MobileAccountStatus.ACTIVA:
-            attrs["cuenta_movil_estado"] = MobileAccountStatus.INACTIVA
-
-        if mobile_status != MobileAccountStatus.SIN_CUENTA and not attrs.get(
-            "correo_acceso", getattr(self.instance, "correo_acceso", "")
-        ):
-            attrs["correo_acceso"] = attrs.get("correo_electronico", getattr(self.instance, "correo_electronico", ""))
-
-        return attrs
-
-    @transaction.atomic
-    def create(self, validated_data):
-        child_ids = validated_data.pop("child_ids")
-        request = self.context.get("request")
-        tutor = Tutor.objects.create(
-            creado_por=getattr(request, "user", None),
-            actualizado_por=getattr(request, "user", None),
-            **validated_data,
-        )
-        tutor.children.set(Child.objects.filter(id__in=child_ids))
-        return tutor
-
-    @transaction.atomic
-    def update(self, instance, validated_data):
-        child_ids = validated_data.pop("child_ids")
-        request = self.context.get("request")
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.actualizado_por = getattr(request, "user", None)
-        instance.save()
-        instance.children.set(Child.objects.filter(id__in=child_ids))
-        return instance
 
 
 class TutorStatusSerializer(serializers.Serializer):

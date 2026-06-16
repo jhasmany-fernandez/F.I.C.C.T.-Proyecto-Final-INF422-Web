@@ -1,6 +1,8 @@
 from datetime import date
 
 from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.core.exceptions import ObjectDoesNotExist
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -38,6 +40,33 @@ class ChildStatus(models.TextChoices):
     INACTIVO = "inactivo", "Inactivo"
 
 
+class StudentGender(models.TextChoices):
+    MASCULINO = "MASCULINO", "Masculino"
+    FEMENINO = "FEMENINO", "Femenino"
+    OTRO = "OTRO", "Otro"
+
+
+class StudentLevel(models.TextChoices):
+    INICIAL = "INICIAL", "Inicial"
+    PRIMARIA = "PRIMARIA", "Primaria"
+    SECUNDARIA = "SECUNDARIA", "Secundaria"
+
+
+class StudentShift(models.TextChoices):
+    MANANA = "MANANA", "Manana"
+    TARDE = "TARDE", "Tarde"
+    NOCHE = "NOCHE", "Noche"
+
+
+class StudentHistoryAction(models.TextChoices):
+    CREACION = "CREACION", "Creacion"
+    EDICION = "EDICION", "Edicion"
+    CAMBIO_ESTADO = "CAMBIO_ESTADO", "Cambio de estado"
+    ASIGNACION_GPS = "ASIGNACION_GPS", "Asignacion GPS"
+    LIBERACION_GPS = "LIBERACION_GPS", "Liberacion GPS"
+    ELIMINACION = "ELIMINACION", "Eliminacion"
+
+
 class TutorStatus(models.TextChoices):
     ACTIVO = "ACTIVO", "Activo"
     INACTIVO = "INACTIVO", "Inactivo"
@@ -47,6 +76,25 @@ class MobileAccountStatus(models.TextChoices):
     ACTIVA = "ACTIVA", "Activa"
     INACTIVA = "INACTIVA", "Inactiva"
     SIN_CUENTA = "SIN_CUENTA", "Sin cuenta"
+
+
+class GPSDeviceStatus(models.TextChoices):
+    DISPONIBLE = "DISPONIBLE", "Disponible"
+    ASIGNADO = "ASIGNADO", "Asignado"
+    EN_MANTENIMIENTO = "EN_MANTENIMIENTO", "En mantenimiento"
+    PERDIDO = "PERDIDO", "Perdido"
+    INACTIVO = "INACTIVO", "Inactivo"
+
+
+class GPSDeviceHistoryAction(models.TextChoices):
+    CREACION = "CREACION", "Creacion"
+    EDICION = "EDICION", "Edicion"
+    ASIGNACION = "ASIGNACION", "Asignacion"
+    DESASIGNACION = "DESASIGNACION", "Desasignacion"
+    CAMBIO_ESTADO = "CAMBIO_ESTADO", "Cambio de estado"
+    ACTIVACION = "ACTIVACION", "Activacion"
+    DESACTIVACION = "DESACTIVACION", "Desactivacion"
+    ELIMINACION_CONTROLADA = "ELIMINACION_CONTROLADA", "Eliminacion controlada"
 
 
 class SafeAreaStatus(models.TextChoices):
@@ -234,10 +282,36 @@ class EducationalCenter(models.Model):
 
 class GPSDevice(models.Model):
     code = models.CharField(max_length=40, unique=True)
+    serial_number = models.CharField(max_length=80, unique=True, null=True, blank=True)
+    phone_number = models.CharField(max_length=30, unique=True, null=True, blank=True)
+    brand = models.CharField(max_length=80, blank=True)
     model = models.CharField(max_length=120)
     imei = models.CharField(max_length=30, unique=True)
+    status = models.CharField(max_length=20, choices=GPSDeviceStatus.choices, default=GPSDeviceStatus.DISPONIBLE)
+    battery_level = models.PositiveSmallIntegerField(
+        default=100,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    last_latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    last_longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        related_name="gps_devices_created",
+        null=True,
+        blank=True,
+    )
+    updated_by = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        related_name="gps_devices_updated",
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         ordering = ("code",)
@@ -249,6 +323,84 @@ class GPSDevice(models.Model):
     def assignment_status(self) -> str:
         assigned = self.children.filter(status=ChildStatus.ACTIVO).exists()
         return "asignado" if assigned else "disponible"
+
+    @property
+    def assigned_child(self):
+        return self.children.filter(status=ChildStatus.ACTIVO).order_by("-fecha_actualizacion", "-id").first()
+
+    @property
+    def is_battery_low(self) -> bool:
+        return self.battery_level <= 20
+
+    @property
+    def is_without_signal(self) -> bool:
+        if not self.last_seen_at:
+            return True
+        return self.last_seen_at <= timezone.now() - timezone.timedelta(hours=24)
+
+    def sync_status_with_assignment(self):
+        child = self.assigned_child
+        if child and self.status != GPSDeviceStatus.ASIGNADO:
+            self.status = GPSDeviceStatus.ASIGNADO
+        elif not child and self.status == GPSDeviceStatus.ASIGNADO:
+            self.status = GPSDeviceStatus.DISPONIBLE if self.is_active else GPSDeviceStatus.INACTIVO
+        if not self.is_active and self.status != GPSDeviceStatus.INACTIVO:
+            self.status = GPSDeviceStatus.INACTIVO
+
+    def save(self, *args, **kwargs):
+        if self.phone_number == "":
+            self.phone_number = None
+        if self.serial_number:
+            self.serial_number = self.serial_number.strip().upper()
+        if self.phone_number:
+            self.phone_number = self.phone_number.strip()
+        if self.brand:
+            self.brand = self.brand.strip()
+        if self.model:
+            self.model = self.model.strip()
+        self.code = self.code.strip().upper()
+        self.imei = self.imei.strip()
+        if not self.is_active:
+            self.status = GPSDeviceStatus.INACTIVO
+        super().save(*args, **kwargs)
+
+
+class GPSDeviceHistory(models.Model):
+    gps_device = models.ForeignKey(GPSDevice, on_delete=models.CASCADE, related_name="history_entries")
+    action = models.CharField(max_length=30, choices=GPSDeviceHistoryAction.choices)
+    detail = models.CharField(max_length=255, blank=True)
+    previous_status = models.CharField(max_length=20, choices=GPSDeviceStatus.choices, blank=True)
+    new_status = models.CharField(max_length=20, choices=GPSDeviceStatus.choices, blank=True)
+    previous_child = models.ForeignKey(
+        "Child",
+        on_delete=models.SET_NULL,
+        related_name="gps_history_previous_entries",
+        null=True,
+        blank=True,
+    )
+    new_child = models.ForeignKey(
+        "Child",
+        on_delete=models.SET_NULL,
+        related_name="gps_history_new_entries",
+        null=True,
+        blank=True,
+    )
+    previous_is_active = models.BooleanField(null=True, blank=True)
+    new_is_active = models.BooleanField(null=True, blank=True)
+    user = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        related_name="gps_history_entries",
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+
+    def __str__(self) -> str:
+        return f"{self.gps_device.code} - {self.action}"
 
 
 class User(AbstractUser):
@@ -278,6 +430,24 @@ class User(AbstractUser):
             self.rol = UserRole.TUTOR
         super().save(*args, **kwargs)
 
+    @property
+    def role_name(self) -> str | None:
+        if not self.role_id:
+            return None
+
+        cached_role = getattr(self, "_role_cache", None)
+        if cached_role is not None:
+            return cached_role.name
+
+        try:
+            return self.role.name
+        except ObjectDoesNotExist:
+            return None
+
+    @property
+    def is_admin_user(self) -> bool:
+        return self.rol == UserRole.ADMIN or (self.role_name or "").strip().lower() == "administrador"
+
     def __str__(self) -> str:
         return f"{self.nombre} <{self.email}>"
 
@@ -301,7 +471,17 @@ class Child(models.Model):
     nombres = models.CharField(max_length=150)
     apellidos = models.CharField(max_length=150)
     fecha_nacimiento = models.DateField()
+    genero = models.CharField(max_length=12, choices=StudentGender.choices, default=StudentGender.OTRO)
+    ci = models.CharField(max_length=30, unique=True, null=True, blank=True)
+    rude = models.CharField(max_length=30, unique=True, null=True, blank=True)
     curso = models.CharField(max_length=100)
+    paralelo = models.CharField(max_length=20, blank=True)
+    nivel = models.CharField(max_length=20, choices=StudentLevel.choices, default=StudentLevel.PRIMARIA)
+    turno = models.CharField(max_length=20, choices=StudentShift.choices, default=StudentShift.MANANA)
+    direccion = models.CharField(max_length=255, blank=True)
+    telefono_contacto = models.CharField(max_length=30, blank=True)
+    nombre_contacto_emergencia = models.CharField(max_length=150, blank=True)
+    telefono_contacto_emergencia = models.CharField(max_length=30, blank=True)
     centro_educativo = models.ForeignKey(
         EducationalCenter,
         on_delete=models.PROTECT,
@@ -317,9 +497,32 @@ class Child(models.Model):
     foto = models.ImageField(upload_to="children/", null=True, blank=True)
     status = models.CharField(max_length=10, choices=ChildStatus.choices, default=ChildStatus.ACTIVO)
     motivo_desactivacion = models.CharField(max_length=200, blank=True)
+    desactivado_en = models.DateTimeField(null=True, blank=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        related_name="students_deleted",
+        null=True,
+        blank=True,
+    )
     tutor_reference = models.CharField(max_length=120, blank=True)
     fecha_registro = models.DateTimeField(auto_now_add=True)
     fecha_actualizacion = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        related_name="students_created",
+        null=True,
+        blank=True,
+    )
+    updated_by = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        related_name="students_updated",
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         ordering = ("-fecha_registro",)
@@ -333,6 +536,66 @@ class Child(models.Model):
         return today.year - self.fecha_nacimiento.year - (
             (today.month, today.day) < (self.fecha_nacimiento.month, self.fecha_nacimiento.day)
         )
+
+    @property
+    def nombre_completo(self) -> str:
+        return f"{self.nombres} {self.apellidos}"
+
+    @property
+    def educational_center(self):
+        return self.centro_educativo
+
+    @property
+    def gps_device(self):
+        return self.dispositivo_gps
+
+    @property
+    def is_deleted(self) -> bool:
+        return self.deleted_at is not None
+
+    def save(self, *args, **kwargs):
+        self.code = self.code.strip().upper()
+        self.nombres = self.nombres.strip()
+        self.apellidos = self.apellidos.strip()
+        self.curso = self.curso.strip()
+        self.paralelo = self.paralelo.strip()
+        self.direccion = self.direccion.strip()
+        self.telefono_contacto = self.telefono_contacto.strip()
+        self.nombre_contacto_emergencia = self.nombre_contacto_emergencia.strip()
+        self.telefono_contacto_emergencia = self.telefono_contacto_emergencia.strip()
+        self.motivo_desactivacion = self.motivo_desactivacion.strip()
+        self.tutor_reference = self.tutor_reference.strip()
+        if self.ci == "":
+            self.ci = None
+        if self.rude == "":
+            self.rude = None
+        if self.ci:
+            self.ci = self.ci.strip().upper()
+        if self.rude:
+            self.rude = self.rude.strip().upper()
+        super().save(*args, **kwargs)
+
+
+class StudentHistory(models.Model):
+    student = models.ForeignKey(Child, on_delete=models.CASCADE, related_name="history_entries")
+    action = models.CharField(max_length=30, choices=StudentHistoryAction.choices)
+    description = models.CharField(max_length=255, blank=True)
+    previous_data = models.JSONField(default=dict, blank=True)
+    new_data = models.JSONField(default=dict, blank=True)
+    performed_by = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        related_name="student_history_entries",
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+
+    def __str__(self) -> str:
+        return f"{self.student.code} - {self.action}"
 
 
 class Tutor(models.Model):

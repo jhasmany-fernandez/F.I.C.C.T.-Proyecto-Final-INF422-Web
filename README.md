@@ -15,6 +15,7 @@ Arquitectura full stack separada en:
 
 ```text
 .
+├── db
 ├── backend
 ├── frontend
 ├── docker-compose.yml
@@ -38,6 +39,7 @@ docker compose up --build
 - `frontend` y `backend` usan volúmenes montados, así que los cambios locales se reflejan dentro del contenedor.
 - Next.js corre en modo `dev` con detección de cambios por polling.
 - Django corre con `runserver`, por lo que recarga automáticamente cuando cambias código Python.
+- PostgreSQL sincroniza automáticamente la contraseña interna del usuario `postgres` con `POSTGRES_PASSWORD` cada vez que arranca el contenedor `db`.
 - Después de este ajuste, ya no necesitas reconstruir ni reiniciar contenedores por cada cambio de código.
 
 Si es la primera vez que aplicas esta configuración, reinicia una vez el stack:
@@ -49,11 +51,11 @@ docker compose up --build
 
 ## URLs esperadas
 
-- Frontend: `http://177.222.97.205:5656`
-- Backend: `http://177.222.97.205:8787`
-- Login API: `http://177.222.97.205:8787/api/auth/login/`
-- Roles y Permisos: `http://177.222.97.205:5656/roles-permisos`
-- Niños Monitoreados: `http://177.222.97.205:5656/ninos-monitoreados`
+- Frontend: `http://35.238.201.88:5656`
+- Backend: `http://35.238.201.88:8787`
+- Login API: `http://35.238.201.88:8787/api/auth/login/`
+- Roles y Permisos: `http://35.238.201.88:5656/roles-permisos`
+- Niños Monitoreados: `http://35.238.201.88:5656/ninos-monitoreados`
 
 ## Endpoints nuevos CU03
 
@@ -165,7 +167,7 @@ docker compose exec backend python manage.py createsuperuser
 ## CORS y seguridad
 
 - CORS permitido para:
-  - `http://177.222.97.205:5656`
+  - `http://35.238.201.88:5656`
   - `http://localhost:5656`
 - La API de login usa JWT y `AllowAny`.
 - La configuración sensible se carga desde variables de entorno.
@@ -184,6 +186,12 @@ docker compose up --build --force-recreate
 docker compose logs -f db
 ```
 
+Si cambió `POSTGRES_PASSWORD` o sospecha que la base quedó desalineada con el `.env`, reinicie `db` y `backend`:
+
+```bash
+docker compose up --build -d db backend
+```
+
 3. Si desea volver a crear el usuario administrador:
 
 ```bash
@@ -199,7 +207,7 @@ docker compose exec backend python manage.py migrate
 ## Cómo probar CU03
 
 1. Inicie sesión con `admin@colegio.com / 12345678`.
-2. Ingrese a `http://177.222.97.205:5656/roles-permisos`.
+2. Ingrese a `http://35.238.201.88:5656/roles-permisos`.
 3. Revise las tarjetas resumen y la tabla de roles.
 4. Cree un rol nuevo con al menos un permiso.
 5. Edite el rol creado y verifique el panel lateral de detalle.
@@ -209,7 +217,7 @@ docker compose exec backend python manage.py migrate
 ## Cómo probar CU04
 
 1. Inicie sesión con `admin@colegio.com / 12345678`.
-2. Abra `http://177.222.97.205:5656/ninos-monitoreados`.
+2. Abra `http://35.238.201.88:5656/ninos-monitoreados`.
 3. Revise tarjetas resumen y la tabla paginada.
 4. Pruebe filtros por nombre, centro, curso, estado, GPS y fecha.
 5. Cree un niño nuevo.

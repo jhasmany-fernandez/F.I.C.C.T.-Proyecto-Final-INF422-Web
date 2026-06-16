@@ -1,3 +1,4 @@
+import logging
 import math
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, time, timedelta
@@ -18,11 +19,16 @@ from .models import (
     AlertType,
     Child,
     ChildStatus,
+    StudentHistory,
+    StudentHistoryAction,
     ChildTutorAssociation,
     ChildTutorAssociationAction,
     EducationalCenter,
     GeographicLocation,
     GPSDevice,
+    GPSDeviceHistory,
+    GPSDeviceHistoryAction,
+    GPSDeviceStatus,
     LocationDeliveryStatus,
     MonitoringAlert,
     MonitoringConfig,
@@ -51,11 +57,16 @@ from .models import (
     refresh_child_tutor_reference,
     sync_tutor_children_mirror,
 )
-from .permissions import IsAdminRole, IsMobileRole, IsMonitoringRole
+from .permissions import IsAdminOrRegentRole, IsAdminRole, IsMobileRole, IsMonitoringRole
 from .serializers import (
     ChildDetailSerializer,
     ChildListSerializer,
     ChildStatusSerializer,
+    StudentDetailSerializer,
+    StudentHistorySerializer,
+    StudentListSerializer,
+    StudentStatusSerializer,
+    StudentWriteSerializer,
     ChildTutorAssociationCreateSerializer,
     ChildTutorAssociationHistorySerializer,
     ChildTutorAssociationSerializer,
@@ -68,7 +79,10 @@ from .serializers import (
     GeographicLocationHistorySerializer,
     GeographicLocationRegisterSerializer,
     GeographicLocationSerializer,
+    GPSDeviceHistorySerializer,
     GPSDeviceSerializer,
+    GPSDeviceStatusSerializer,
+    GPSDeviceWriteSerializer,
     LoginSerializer,
     MonitoringAnalyzeSerializer,
     MonitoringConfigSerializer,
@@ -79,7 +93,12 @@ from .serializers import (
     MonitoringHistorySerializer,
     ModuleSerializer,
     PermissionSerializer,
+    RegentDetailSerializer,
+    RegentEducationalCenterSerializer,
+    RegentListSerializer,
     RegentOptionSerializer,
+    RegentStatusSerializer,
+    RegentWriteSerializer,
     RoleDetailSerializer,
     RoleListSerializer,
     RiskZoneCreateUpdateSerializer,
@@ -100,9 +119,14 @@ from .serializers import (
     TutorListSerializer,
     TutorStatusSerializer,
     TutorWriteSerializer,
+    UserDetailSerializer,
+    UserListSerializer,
+    UserStatusSerializer,
+    UserWriteSerializer,
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 class LoginView(APIView):
@@ -130,8 +154,7 @@ class LoginView(APIView):
             if not user.is_active:
                 return Response({"message": "Tu cuenta se encuentra inactiva."}, status=status.HTTP_403_FORBIDDEN)
 
-            is_admin = user.rol == UserRole.ADMIN or (user.role and user.role.name.strip().lower() == "administrador")
-            if client_platform != "mobile" and not is_admin:
+            if client_platform != "mobile" and user.rol not in {UserRole.ADMIN, UserRole.REGENTE}:
                 return Response({"message": "Rol no autorizado para acceso web."}, status=status.HTTP_403_FORBIDDEN)
 
             refresh = RefreshToken.for_user(user)
@@ -145,12 +168,13 @@ class LoginView(APIView):
                         "email": user.email,
                         "nombre": user.nombre,
                         "rol": user.rol,
-                        "role": user.role.name if user.role else None,
+                        "role": user.role_name,
                     },
                 },
                 status=status.HTTP_200_OK,
             )
         except Exception:
+            logger.exception("Login failed for email=%s platform=%s", email, client_platform)
             return Response({"message": "Ocurrió un error interno controlado."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -258,6 +282,178 @@ def calculate_polygon_metrics(points: list[tuple[float, float]]):
     }
 
 
+class UserListCreateView(BaseAdminView):
+    def get(self, request):
+        try:
+            queryset = User.objects.select_related("role").all()
+
+            search = request.query_params.get("search", "").strip()
+            role = request.query_params.get("role", "").strip().upper()
+            is_active = request.query_params.get("is_active", "").strip().lower()
+
+            if search:
+                queryset = queryset.filter(
+                    Q(nombre__icontains=search) | Q(last_name__icontains=search) | Q(email__icontains=search)
+                )
+            if role in {UserRole.ADMIN, UserRole.REGENTE, UserRole.TUTOR}:
+                queryset = queryset.filter(rol=role)
+            if is_active in {"true", "false", "activo", "inactivo"}:
+                queryset = queryset.filter(is_active=is_active in {"true", "activo"})
+
+            total = queryset.count()
+            page = max(int(request.query_params.get("page", "1") or 1), 1)
+            page_size = max(min(int(request.query_params.get("page_size", "10") or 10), 100), 1)
+            start = (page - 1) * page_size
+            end = start + page_size
+            items = queryset.order_by("-date_joined", "-id")[start:end]
+            total_pages = (total + page_size - 1) // page_size if total else 1
+
+            return Response(
+                {
+                    "count": total,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                    "results": UserListSerializer(items, many=True).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception:
+            logger.exception("User list failed")
+            return Response({"message": "No se pudo cargar la lista de usuarios."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def post(self, request):
+        try:
+            serializer = UserWriteSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(
+                    {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            user = serializer.save()
+            detail = self._get_detail(user.id)
+            return Response(UserDetailSerializer(detail).data, status=status.HTTP_201_CREATED)
+        except IntegrityError:
+            return Response(
+                {
+                    "message": "Ya existe un usuario con ese correo electrónico.",
+                    "errors": {"email": ["Ya existe un usuario con ese correo electrónico."]},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception:
+            logger.exception("User create failed")
+            return Response({"message": "Error al guardar. Intente nuevamente."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def _get_detail(self, user_id: int):
+        return User.objects.select_related("role").get(pk=user_id)
+
+
+class UserDetailView(BaseAdminView):
+    def get_object(self, user_id: int):
+        return User.objects.select_related("role").filter(pk=user_id).first()
+
+    def get(self, request, user_id: int):
+        try:
+            user = self.get_object(user_id)
+            if not user:
+                return Response({"message": "Usuario no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(UserDetailSerializer(user).data, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("User detail failed for user_id=%s", user_id)
+            return Response({"message": "No se pudo cargar el detalle del usuario."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def put(self, request, user_id: int):
+        try:
+            user = self.get_object(user_id)
+            if not user:
+                return Response({"message": "Usuario no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+            serializer = UserWriteSerializer(instance=user, data=request.data)
+            if not serializer.is_valid():
+                return Response(
+                    {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            updated_user = serializer.save()
+            detail = self.get_object(updated_user.id)
+            return Response(UserDetailSerializer(detail).data, status=status.HTTP_200_OK)
+        except IntegrityError:
+            return Response(
+                {
+                    "message": "Ya existe un usuario con ese correo electrónico.",
+                    "errors": {"email": ["Ya existe un usuario con ese correo electrónico."]},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception:
+            logger.exception("User update failed for user_id=%s", user_id)
+            return Response({"message": "Error al guardar. Intente nuevamente."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def delete(self, request, user_id: int):
+        user = self.get_object(user_id)
+        if not user:
+            return Response({"message": "Usuario no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.id == user.id:
+            return Response({"message": "No puede desactivar su propio usuario."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+        detail = self.get_object(user.id)
+        return Response(
+            {
+                "message": "Usuario inactivado correctamente.",
+                "user": UserDetailSerializer(detail).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class UserStatusView(BaseAdminView):
+    def patch(self, request, user_id: int):
+        user = User.objects.select_related("role").filter(pk=user_id).first()
+        if not user:
+            return Response({"message": "Usuario no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = UserStatusSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        next_status = serializer.validated_data["is_active"]
+        if request.user.id == user.id and not next_status:
+            return Response({"message": "No puede desactivar su propio usuario."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.is_active = next_status
+        user.save(update_fields=["is_active"])
+        detail = User.objects.select_related("role").get(pk=user_id)
+        return Response(UserDetailSerializer(detail).data, status=status.HTTP_200_OK)
+
+
+class UserStatsView(BaseAdminView):
+    def get(self, request):
+        try:
+            queryset = User.objects.all()
+            return Response(
+                {
+                    "total_usuarios": queryset.count(),
+                    "activos": queryset.filter(is_active=True).count(),
+                    "inactivos": queryset.filter(is_active=False).count(),
+                    "administradores": queryset.filter(rol=UserRole.ADMIN).count(),
+                    "regentes": queryset.filter(rol=UserRole.REGENTE).count(),
+                    "tutores": queryset.filter(rol=UserRole.TUTOR).count(),
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception:
+            logger.exception("User stats failed")
+            return Response({"message": "No se pudieron cargar las estadísticas de usuarios."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 def validate_and_measure_polygon(polygon: dict):
     points = parse_polygon_payload(polygon)
     metrics = calculate_polygon_metrics(points)
@@ -329,6 +525,33 @@ def point_inside_polygon(longitude: float, latitude: float, polygon: dict) -> bo
         previous_index = index
 
     return is_inside
+
+
+def create_gps_device_history(
+    *,
+    gps_device: GPSDevice,
+    action: str,
+    user=None,
+    detail: str = "",
+    previous_status: str = "",
+    new_status: str = "",
+    previous_child: Child | None = None,
+    new_child: Child | None = None,
+    previous_is_active: bool | None = None,
+    new_is_active: bool | None = None,
+):
+    GPSDeviceHistory.objects.create(
+        gps_device=gps_device,
+        action=action,
+        user=user,
+        detail=detail,
+        previous_status=previous_status,
+        new_status=new_status,
+        previous_child=previous_child,
+        new_child=new_child,
+        previous_is_active=previous_is_active,
+        new_is_active=new_is_active,
+    )
 
 
 def get_client_ip(request) -> str | None:
@@ -1549,12 +1772,168 @@ class EducationalCenterStatsView(BaseAdminView):
         )
 
 
-class RegentListView(BaseAdminView):
+def get_regent_queryset():
+    return User.objects.select_related("role").prefetch_related(
+        Prefetch("assigned_educational_centers", queryset=EducationalCenter.objects.order_by("name"))
+    ).filter(
+        Q(rol=UserRole.REGENTE) | Q(role__name__iexact="Regente")
+    ).distinct()
+
+
+class RegentOptionsView(BaseAdminView):
     def get(self, request):
-        regents = User.objects.filter(is_active=True).filter(
-            Q(rol=UserRole.REGENTE) | Q(role__name__iexact="Regente")
-        ).order_by("nombre")
+        regents = get_regent_queryset().filter(is_active=True).order_by("nombre")
         return Response(RegentOptionSerializer(regents, many=True).data, status=status.HTTP_200_OK)
+
+
+class RegentEducationalCenterOptionsView(BaseAdminView):
+    def get(self, request):
+        centers = EducationalCenter.objects.filter(is_active=True).order_by("name")
+        return Response(RegentEducationalCenterSerializer(centers, many=True).data, status=status.HTTP_200_OK)
+
+
+class RegentListCreateView(BaseAdminView):
+    def get(self, request):
+        queryset = get_regent_queryset()
+
+        search = request.query_params.get("search", "").strip()
+        educational_center_id = request.query_params.get("educational_center_id", "").strip()
+        is_active = request.query_params.get("is_active", "").strip().lower()
+
+        if search:
+            queryset = queryset.filter(
+                Q(nombre__icontains=search) | Q(last_name__icontains=search) | Q(email__icontains=search)
+            )
+        if educational_center_id:
+            queryset = queryset.filter(assigned_educational_centers__id=educational_center_id)
+        if is_active in {"true", "false", "activo", "inactivo"}:
+            queryset = queryset.filter(is_active=is_active in {"true", "activo"})
+
+        total = queryset.count()
+        page = max(int(request.query_params.get("page", "1") or 1), 1)
+        page_size = max(min(int(request.query_params.get("page_size", "10") or 10), 100), 1)
+        start = (page - 1) * page_size
+        end = start + page_size
+        items = queryset.order_by("-date_joined", "-id")[start:end]
+        total_pages = (total + page_size - 1) // page_size if total else 1
+
+        return Response(
+            {
+                "count": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+                "results": RegentListSerializer(items, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        serializer = RegentWriteSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            regent = serializer.save()
+            detail = self._get_detail(regent.id)
+            return Response(RegentDetailSerializer(detail).data, status=status.HTTP_201_CREATED)
+        except Exception:
+            logger.exception("Regent create failed")
+            return Response({"message": "Error al guardar. Intente nuevamente."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def _get_detail(self, regent_id: int):
+        return get_regent_queryset().get(pk=regent_id)
+
+
+class RegentDetailView(BaseAdminView):
+    def get_object(self, regent_id: int):
+        return get_regent_queryset().filter(pk=regent_id).first()
+
+    def get(self, request, regent_id: int):
+        regent = self.get_object(regent_id)
+        if not regent:
+            return Response({"message": "Regente no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(RegentDetailSerializer(regent).data, status=status.HTTP_200_OK)
+
+    def put(self, request, regent_id: int):
+        regent = self.get_object(regent_id)
+        if not regent:
+            return Response({"message": "Regente no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = RegentWriteSerializer(instance=regent, data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            updated_regent = serializer.save()
+            detail = self.get_object(updated_regent.id)
+            return Response(RegentDetailSerializer(detail).data, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Regent update failed for regent_id=%s", regent_id)
+            return Response({"message": "Error al guardar. Intente nuevamente."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def delete(self, request, regent_id: int):
+        regent = self.get_object(regent_id)
+        if not regent:
+            return Response({"message": "Regente no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.id == regent.id:
+            return Response({"message": "No puede inactivar su propio usuario."}, status=status.HTTP_400_BAD_REQUEST)
+
+        regent.is_active = False
+        regent.save(update_fields=["is_active"])
+        detail = self.get_object(regent.id)
+        return Response(
+            {
+                "message": "Regente inactivado correctamente.",
+                "regent": RegentDetailSerializer(detail).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class RegentStatusView(BaseAdminView):
+    def patch(self, request, regent_id: int):
+        regent = get_regent_queryset().filter(pk=regent_id).first()
+        if not regent:
+            return Response({"message": "Regente no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = RegentStatusSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        next_status = serializer.validated_data["is_active"]
+        if request.user.id == regent.id and not next_status:
+            return Response({"message": "No puede inactivar su propio usuario."}, status=status.HTTP_400_BAD_REQUEST)
+
+        regent.is_active = next_status
+        regent.save(update_fields=["is_active"])
+        detail = get_regent_queryset().get(pk=regent_id)
+        return Response(RegentDetailSerializer(detail).data, status=status.HTTP_200_OK)
+
+
+class RegentStatsView(BaseAdminView):
+    def get(self, request):
+        regents = User.objects.filter(Q(rol=UserRole.REGENTE) | Q(role__name__iexact="Regente")).distinct()
+        centers = EducationalCenter.objects.all()
+        return Response(
+            {
+                "total_regentes": regents.count(),
+                "activos": regents.filter(is_active=True).count(),
+                "inactivos": regents.filter(is_active=False).count(),
+                "centros_con_regente": centers.filter(regent__isnull=False).count(),
+                "centros_sin_regente": centers.filter(regent__isnull=True).count(),
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class RiskZoneListCreateView(BaseAdminView):
@@ -2066,10 +2445,250 @@ class SafeAreaCalculateView(BaseAdminView):
             return Response({"message": str(error)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class GPSDeviceListView(BaseAdminView):
+def get_gps_device_queryset():
+    return GPSDevice.objects.select_related("created_by", "updated_by").prefetch_related("children").order_by("code")
+
+
+class GPSDeviceListCreateView(BaseAdminView):
     def get(self, request):
-        devices = GPSDevice.objects.order_by("code")
+        queryset = get_gps_device_queryset()
+
+        search = request.query_params.get("search", "").strip()
+        status_value = request.query_params.get("status", "").strip().upper()
+        is_active = request.query_params.get("is_active", "").strip().lower()
+        assigned = request.query_params.get("assigned", "").strip().lower()
+        battery_low = request.query_params.get("battery_low", "").strip().lower()
+
+        if search:
+            queryset = queryset.filter(
+                Q(code__icontains=search)
+                | Q(serial_number__icontains=search)
+                | Q(imei__icontains=search)
+                | Q(phone_number__icontains=search)
+                | Q(brand__icontains=search)
+                | Q(model__icontains=search)
+            )
+        if status_value in {choice for choice, _ in GPSDeviceStatus.choices}:
+            queryset = queryset.filter(status=status_value)
+        if is_active in {"true", "false", "activo", "inactivo"}:
+            queryset = queryset.filter(is_active=is_active in {"true", "activo"})
+        if assigned in {"true", "false"}:
+            queryset = queryset.filter(children__status=ChildStatus.ACTIVO).distinct() if assigned == "true" else queryset.exclude(children__status=ChildStatus.ACTIVO)
+        if battery_low in {"true", "false"}:
+            queryset = queryset.filter(battery_level__lte=20) if battery_low == "true" else queryset.filter(battery_level__gt=20)
+
+        total = queryset.count()
+        page = max(int(request.query_params.get("page", "1") or 1), 1)
+        page_size = max(min(int(request.query_params.get("page_size", "10") or 10), 100), 1)
+        start = (page - 1) * page_size
+        end = start + page_size
+        items = queryset.order_by("code")[start:end]
+        total_pages = (total + page_size - 1) // page_size if total else 1
+
+        return Response(
+            {
+                "count": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+                "results": GPSDeviceSerializer(items, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        serializer = GPSDeviceWriteSerializer(data=request.data, context={"request": request})
+        if not serializer.is_valid():
+            return Response(
+                {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            gps_device = serializer.save()
+            gps_device.refresh_from_db()
+            create_gps_device_history(
+                gps_device=gps_device,
+                action=GPSDeviceHistoryAction.CREACION,
+                user=request.user,
+                detail="Dispositivo GPS creado.",
+                new_status=gps_device.status,
+                new_child=gps_device.assigned_child,
+                new_is_active=gps_device.is_active,
+            )
+            return Response(GPSDeviceSerializer(gps_device).data, status=status.HTTP_201_CREATED)
+        except Exception:
+            logger.exception("GPS device create failed")
+            return Response({"message": "Error al guardar. Intente nuevamente."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class GPSDeviceDetailView(BaseAdminView):
+    def get_object(self, gps_device_id: int):
+        return get_gps_device_queryset().filter(pk=gps_device_id).first()
+
+    def get(self, request, gps_device_id: int):
+        gps_device = self.get_object(gps_device_id)
+        if not gps_device:
+            return Response({"message": "Dispositivo GPS no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(GPSDeviceSerializer(gps_device).data, status=status.HTTP_200_OK)
+
+    def put(self, request, gps_device_id: int):
+        gps_device = self.get_object(gps_device_id)
+        if not gps_device:
+            return Response({"message": "Dispositivo GPS no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        previous_status = gps_device.status
+        previous_child = gps_device.assigned_child
+        previous_is_active = gps_device.is_active
+
+        serializer = GPSDeviceWriteSerializer(instance=gps_device, data=request.data, context={"request": request})
+        if not serializer.is_valid():
+            return Response(
+                {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            updated_device = serializer.save()
+            updated_device.refresh_from_db()
+            new_child = updated_device.assigned_child
+            action = GPSDeviceHistoryAction.EDICION
+            detail = "Dispositivo GPS actualizado."
+            if previous_child != new_child:
+                action = GPSDeviceHistoryAction.ASIGNACION if new_child else GPSDeviceHistoryAction.DESASIGNACION
+                detail = "Asignación de niño actualizada."
+            elif previous_status != updated_device.status:
+                action = GPSDeviceHistoryAction.CAMBIO_ESTADO
+                detail = "Estado del dispositivo actualizado."
+            create_gps_device_history(
+                gps_device=updated_device,
+                action=action,
+                user=request.user,
+                detail=detail,
+                previous_status=previous_status,
+                new_status=updated_device.status,
+                previous_child=previous_child,
+                new_child=new_child,
+                previous_is_active=previous_is_active,
+                new_is_active=updated_device.is_active,
+            )
+            return Response(GPSDeviceSerializer(updated_device).data, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("GPS device update failed for gps_device_id=%s", gps_device_id)
+            return Response({"message": "Error al guardar. Intente nuevamente."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def delete(self, request, gps_device_id: int):
+        gps_device = self.get_object(gps_device_id)
+        if not gps_device:
+            return Response({"message": "Dispositivo GPS no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        if gps_device.assigned_child:
+            return Response(
+                {"message": "No se puede eliminar un dispositivo GPS asignado a un niño activo."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous_status = gps_device.status
+        previous_is_active = gps_device.is_active
+        gps_device.is_active = False
+        gps_device.status = GPSDeviceStatus.INACTIVO
+        gps_device.updated_by = request.user
+        gps_device.save(update_fields=["is_active", "status", "updated_by", "updated_at"])
+        create_gps_device_history(
+            gps_device=gps_device,
+            action=GPSDeviceHistoryAction.ELIMINACION_CONTROLADA,
+            user=request.user,
+            detail="Dispositivo GPS inactivado por eliminación controlada.",
+            previous_status=previous_status,
+            new_status=gps_device.status,
+            previous_is_active=previous_is_active,
+            new_is_active=gps_device.is_active,
+        )
+        return Response(
+            {"message": "Dispositivo GPS inactivado correctamente.", "device": GPSDeviceSerializer(gps_device).data},
+            status=status.HTTP_200_OK,
+        )
+
+
+class GPSDeviceStatusView(BaseAdminView):
+    def patch(self, request, gps_device_id: int):
+        gps_device = get_gps_device_queryset().filter(pk=gps_device_id).first()
+        if not gps_device:
+            return Response({"message": "Dispositivo GPS no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = GPSDeviceStatusSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        next_status = serializer.validated_data["status"]
+        next_is_active = serializer.validated_data.get("is_active", next_status != GPSDeviceStatus.INACTIVO)
+        if gps_device.assigned_child and next_status != GPSDeviceStatus.ASIGNADO:
+            return Response(
+                {"message": "No puede cambiar el estado mientras el dispositivo siga asignado a un niño activo."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous_status = gps_device.status
+        previous_is_active = gps_device.is_active
+        gps_device.status = next_status
+        gps_device.is_active = next_is_active
+        gps_device.updated_by = request.user
+        gps_device.save(update_fields=["status", "is_active", "updated_by", "updated_at"])
+        create_gps_device_history(
+            gps_device=gps_device,
+            action=GPSDeviceHistoryAction.CAMBIO_ESTADO,
+            user=request.user,
+            detail="Estado del dispositivo actualizado.",
+            previous_status=previous_status,
+            new_status=gps_device.status,
+            previous_child=gps_device.assigned_child,
+            new_child=gps_device.assigned_child,
+            previous_is_active=previous_is_active,
+            new_is_active=gps_device.is_active,
+        )
+        return Response(GPSDeviceSerializer(gps_device).data, status=status.HTTP_200_OK)
+
+
+class GPSDeviceStatsView(BaseAdminView):
+    def get(self, request):
+        queryset = GPSDevice.objects.all()
+        now = timezone.now()
+        signal_limit = now - timedelta(hours=24)
+        return Response(
+            {
+                "total_dispositivos": queryset.count(),
+                "disponibles": queryset.filter(status=GPSDeviceStatus.DISPONIBLE).count(),
+                "asignados": queryset.filter(status=GPSDeviceStatus.ASIGNADO).count(),
+                "en_mantenimiento": queryset.filter(status=GPSDeviceStatus.EN_MANTENIMIENTO).count(),
+                "perdidos": queryset.filter(status=GPSDeviceStatus.PERDIDO).count(),
+                "inactivos": queryset.filter(status=GPSDeviceStatus.INACTIVO).count(),
+                "bateria_baja": queryset.filter(battery_level__lte=20).count(),
+                "sin_senal": queryset.filter(Q(last_seen_at__isnull=True) | Q(last_seen_at__lte=signal_limit)).count(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class GPSDeviceAvailableView(BaseAdminView):
+    def get(self, request):
+        devices = (
+            GPSDevice.objects.filter(is_active=True, status=GPSDeviceStatus.DISPONIBLE)
+            .exclude(children__status=ChildStatus.ACTIVO)
+            .distinct()
+            .order_by("code")
+        )
         return Response(GPSDeviceSerializer(devices, many=True).data, status=status.HTTP_200_OK)
+
+
+class GPSDeviceHistoryView(BaseAdminView):
+    def get(self, request, gps_device_id: int):
+        gps_device = GPSDevice.objects.filter(pk=gps_device_id).first()
+        if not gps_device:
+            return Response({"message": "Dispositivo GPS no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        history = gps_device.history_entries.select_related("user", "previous_child", "new_child").all()
+        return Response(GPSDeviceHistorySerializer(history, many=True).data, status=status.HTTP_200_OK)
 
 
 class MobileLocationContextView(BaseMobileView):
@@ -3339,6 +3958,373 @@ class ChildStatsView(BaseAdminView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+def get_student_queryset_for_user(user: User):
+    queryset = Child.objects.select_related("centro_educativo", "dispositivo_gps", "created_by", "updated_by", "deleted_by").filter(
+        deleted_at__isnull=True
+    )
+    if user.rol == UserRole.REGENTE:
+        queryset = queryset.filter(centro_educativo__regent=user)
+    return queryset
+
+
+def serialize_student_snapshot(student: Child | None):
+    if student is None:
+        return {}
+    return {
+        "id": student.id,
+        "code": student.code,
+        "nombres": student.nombres,
+        "apellidos": student.apellidos,
+        "nombre_completo": student.nombre_completo,
+        "fecha_nacimiento": student.fecha_nacimiento.isoformat(),
+        "edad": student.edad,
+        "genero": student.genero,
+        "ci": student.ci,
+        "rude": student.rude,
+        "curso": student.curso,
+        "paralelo": student.paralelo,
+        "nivel": student.nivel,
+        "turno": student.turno,
+        "direccion": student.direccion,
+        "telefono_contacto": student.telefono_contacto,
+        "nombre_contacto_emergencia": student.nombre_contacto_emergencia,
+        "telefono_contacto_emergencia": student.telefono_contacto_emergencia,
+        "educational_center": {
+            "id": student.centro_educativo_id,
+            "code": student.centro_educativo.code if student.centro_educativo_id else None,
+            "name": student.centro_educativo.name if student.centro_educativo_id else None,
+        },
+        "gps_device": {
+            "id": student.dispositivo_gps_id,
+            "code": student.dispositivo_gps.code if student.dispositivo_gps_id else None,
+            "status": student.dispositivo_gps.status if student.dispositivo_gps_id else None,
+        }
+        if student.dispositivo_gps_id
+        else None,
+        "status": student.status.upper(),
+        "motivo_desactivacion": student.motivo_desactivacion,
+        "desactivado_en": student.desactivado_en.isoformat() if student.desactivado_en else None,
+    }
+
+
+def create_student_history(*, student: Child, action: str, description: str, performed_by=None, previous_data=None, new_data=None):
+    StudentHistory.objects.create(
+        student=student,
+        action=action,
+        description=description,
+        previous_data=previous_data or {},
+        new_data=new_data or {},
+        performed_by=performed_by,
+    )
+
+
+class BaseStudentView(BaseAdminView):
+    permission_classes = [IsAdminOrRegentRole]
+
+    def ensure_write_allowed(self, request):
+        if request.user.rol != UserRole.ADMIN:
+            return Response({"detail": "No tiene permisos para realizar esta acción."}, status=status.HTTP_403_FORBIDDEN)
+        return None
+
+
+class StudentListCreateView(BaseStudentView):
+    def get(self, request):
+        queryset = get_student_queryset_for_user(request.user)
+
+        search = request.query_params.get("search", "").strip()
+        student_status = request.query_params.get("status", "").strip().upper()
+        educational_center = request.query_params.get("educational_center", "").strip()
+        nivel = request.query_params.get("nivel", "").strip().upper()
+        curso = request.query_params.get("curso", "").strip()
+        paralelo = request.query_params.get("paralelo", "").strip()
+        turno = request.query_params.get("turno", "").strip().upper()
+        genero = request.query_params.get("genero", "").strip().upper()
+        has_gps = request.query_params.get("has_gps", "").strip().lower()
+
+        if search:
+            queryset = queryset.filter(
+                Q(nombres__icontains=search)
+                | Q(apellidos__icontains=search)
+                | Q(code__icontains=search)
+                | Q(ci__icontains=search)
+                | Q(rude__icontains=search)
+            )
+        if student_status in {"ACTIVO", "INACTIVO"}:
+            queryset = queryset.filter(status=ChildStatus.ACTIVO if student_status == "ACTIVO" else ChildStatus.INACTIVO)
+        if educational_center:
+            queryset = queryset.filter(centro_educativo_id=educational_center)
+        if nivel:
+            queryset = queryset.filter(nivel=nivel)
+        if curso:
+            queryset = queryset.filter(curso__icontains=curso)
+        if paralelo:
+            queryset = queryset.filter(paralelo__icontains=paralelo)
+        if turno:
+            queryset = queryset.filter(turno=turno)
+        if genero:
+            queryset = queryset.filter(genero=genero)
+        if has_gps in {"true", "false"}:
+            queryset = queryset.filter(dispositivo_gps__isnull=has_gps == "false")
+
+        total = queryset.count()
+        page = max(int(request.query_params.get("page", "1") or 1), 1)
+        page_size = max(min(int(request.query_params.get("page_size", "10") or 10), 100), 1)
+        start = (page - 1) * page_size
+        end = start + page_size
+        items = queryset.order_by("apellidos", "nombres", "id")[start:end]
+        total_pages = (total + page_size - 1) // page_size if total else 1
+
+        return Response(
+            {
+                "count": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+                "results": StudentListSerializer(items, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @transaction.atomic
+    def post(self, request):
+        forbidden = self.ensure_write_allowed(request)
+        if forbidden:
+            return forbidden
+
+        serializer = StudentWriteSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        student = serializer.save(created_by=request.user, updated_by=request.user)
+        detail = Child.objects.select_related("centro_educativo", "dispositivo_gps", "created_by", "updated_by").get(pk=student.id)
+        create_student_history(
+            student=detail,
+            action=StudentHistoryAction.CREACION,
+            description="Estudiante creado.",
+            performed_by=request.user,
+            new_data=serialize_student_snapshot(detail),
+        )
+        return Response(StudentDetailSerializer(detail).data, status=status.HTTP_201_CREATED)
+
+
+class StudentDetailView(BaseStudentView):
+    def get_object(self, request, student_id: int):
+        return get_student_queryset_for_user(request.user).filter(pk=student_id).first()
+
+    def get(self, request, student_id: int):
+        student = self.get_object(request, student_id)
+        if not student:
+            return Response({"message": "Estudiante no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(StudentDetailSerializer(student).data, status=status.HTTP_200_OK)
+
+    @transaction.atomic
+    def put(self, request, student_id: int):
+        forbidden = self.ensure_write_allowed(request)
+        if forbidden:
+            return forbidden
+
+        student = self.get_object(request, student_id)
+        if not student:
+            return Response({"message": "Estudiante no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        previous_data = serialize_student_snapshot(student)
+        previous_device_id = student.dispositivo_gps_id
+
+        serializer = StudentWriteSerializer(instance=student, data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        updated_student = serializer.save(updated_by=request.user)
+        if updated_student.status == ChildStatus.INACTIVO and updated_student.dispositivo_gps_id:
+            released_device = updated_student.dispositivo_gps
+            updated_student.dispositivo_gps = None
+            updated_student.save(update_fields=["dispositivo_gps", "fecha_actualizacion", "updated_by"])
+            released_device.sync_status_with_assignment()
+            released_device.save(update_fields=["status", "updated_at"])
+
+        detail = Child.objects.select_related("centro_educativo", "dispositivo_gps", "created_by", "updated_by", "deleted_by").get(pk=updated_student.id)
+        action = StudentHistoryAction.EDICION
+        description = "Estudiante actualizado."
+        if previous_device_id != detail.dispositivo_gps_id:
+            action = StudentHistoryAction.ASIGNACION_GPS if detail.dispositivo_gps_id else StudentHistoryAction.LIBERACION_GPS
+            description = "Asignación de GPS actualizada."
+        create_student_history(
+            student=detail,
+            action=action,
+            description=description,
+            performed_by=request.user,
+            previous_data=previous_data,
+            new_data=serialize_student_snapshot(detail),
+        )
+        return Response(StudentDetailSerializer(detail).data, status=status.HTTP_200_OK)
+
+    @transaction.atomic
+    def delete(self, request, student_id: int):
+        forbidden = self.ensure_write_allowed(request)
+        if forbidden:
+            return forbidden
+
+        student = self.get_object(request, student_id)
+        if not student:
+            return Response({"message": "Estudiante no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        previous_data = serialize_student_snapshot(student)
+        released_device = student.dispositivo_gps
+        student.status = ChildStatus.INACTIVO
+        student.motivo_desactivacion = student.motivo_desactivacion or "Baja lógica del estudiante."
+        student.desactivado_en = timezone.now()
+        student.deleted_at = timezone.now()
+        student.deleted_by = request.user
+        student.updated_by = request.user
+        student.dispositivo_gps = None
+        student.save(
+            update_fields=[
+                "status",
+                "motivo_desactivacion",
+                "desactivado_en",
+                "deleted_at",
+                "deleted_by",
+                "updated_by",
+                "dispositivo_gps",
+                "fecha_actualizacion",
+            ]
+        )
+        if released_device:
+            released_device.sync_status_with_assignment()
+            released_device.save(update_fields=["status", "updated_at"])
+
+        create_student_history(
+            student=student,
+            action=StudentHistoryAction.ELIMINACION,
+            description="Estudiante eliminado lógicamente.",
+            performed_by=request.user,
+            previous_data=previous_data,
+            new_data=serialize_student_snapshot(student),
+        )
+        return Response({"message": "Estudiante eliminado correctamente."}, status=status.HTTP_200_OK)
+
+
+class StudentStatusView(BaseStudentView):
+    @transaction.atomic
+    def patch(self, request, student_id: int):
+        forbidden = self.ensure_write_allowed(request)
+        if forbidden:
+            return forbidden
+
+        student = get_student_queryset_for_user(request.user).filter(pk=student_id).first()
+        if not student:
+            return Response({"message": "Estudiante no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = StudentStatusSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"message": self.extract_error_message(serializer.errors), "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous_data = serialize_student_snapshot(student)
+        next_status = serializer.validated_data["status"]
+        motivo = serializer.validated_data.get("motivo_desactivacion", "").strip()
+
+        if next_status == "ACTIVO":
+            student.status = ChildStatus.ACTIVO
+            student.motivo_desactivacion = ""
+            student.desactivado_en = None
+        else:
+            student.status = ChildStatus.INACTIVO
+            student.motivo_desactivacion = motivo
+            student.desactivado_en = timezone.now()
+            if student.dispositivo_gps:
+                released_device = student.dispositivo_gps
+                student.dispositivo_gps = None
+                released_device.sync_status_with_assignment()
+                released_device.save(update_fields=["status", "updated_at"])
+
+        student.updated_by = request.user
+        student.save(update_fields=["status", "motivo_desactivacion", "desactivado_en", "dispositivo_gps", "updated_by", "fecha_actualizacion"])
+        detail = Child.objects.select_related("centro_educativo", "dispositivo_gps", "created_by", "updated_by", "deleted_by").get(pk=student_id)
+        create_student_history(
+            student=detail,
+            action=StudentHistoryAction.CAMBIO_ESTADO,
+            description="Estado del estudiante actualizado.",
+            performed_by=request.user,
+            previous_data=previous_data,
+            new_data=serialize_student_snapshot(detail),
+        )
+        return Response(StudentDetailSerializer(detail).data, status=status.HTTP_200_OK)
+
+
+class StudentStatsView(BaseStudentView):
+    def get(self, request):
+        queryset = get_student_queryset_for_user(request.user)
+        return Response(
+            {
+                "total_estudiantes": queryset.count(),
+                "activos": queryset.filter(status=ChildStatus.ACTIVO).count(),
+                "inactivos": queryset.filter(status=ChildStatus.INACTIVO).count(),
+                "con_gps": queryset.filter(dispositivo_gps__isnull=False).count(),
+                "sin_gps": queryset.filter(dispositivo_gps__isnull=True).count(),
+                "por_nivel": {
+                    "INICIAL": queryset.filter(nivel="INICIAL").count(),
+                    "PRIMARIA": queryset.filter(nivel="PRIMARIA").count(),
+                    "SECUNDARIA": queryset.filter(nivel="SECUNDARIA").count(),
+                },
+                "por_turno": {
+                    "MANANA": queryset.filter(turno="MANANA").count(),
+                    "TARDE": queryset.filter(turno="TARDE").count(),
+                    "NOCHE": queryset.filter(turno="NOCHE").count(),
+                },
+                "por_genero": {
+                    "MASCULINO": queryset.filter(genero="MASCULINO").count(),
+                    "FEMENINO": queryset.filter(genero="FEMENINO").count(),
+                    "OTRO": queryset.filter(genero="OTRO").count(),
+                },
+                "por_centro": [
+                    {
+                        "id": row["centro_educativo_id"],
+                        "name": row["centro_educativo__name"],
+                        "count": row["count"],
+                    }
+                    for row in queryset.values("centro_educativo_id", "centro_educativo__name").annotate(count=Count("id")).order_by("centro_educativo__name")
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class StudentByCenterView(BaseStudentView):
+    def get(self, request, center_id: int):
+        queryset = get_student_queryset_for_user(request.user).filter(centro_educativo_id=center_id)
+        return Response(StudentListSerializer(queryset.order_by("apellidos", "nombres"), many=True).data, status=status.HTTP_200_OK)
+
+
+class StudentHistoryView(BaseStudentView):
+    def get(self, request, student_id: int):
+        student = get_student_queryset_for_user(request.user).filter(pk=student_id).first()
+        if not student:
+            return Response({"message": "Estudiante no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        history = student.history_entries.select_related("performed_by").all()
+        return Response(StudentHistorySerializer(history, many=True).data, status=status.HTTP_200_OK)
+
+
+class StudentActiveView(BaseStudentView):
+    def get(self, request):
+        queryset = get_student_queryset_for_user(request.user).filter(status=ChildStatus.ACTIVO)
+        return Response(StudentListSerializer(queryset.order_by("apellidos", "nombres"), many=True).data, status=status.HTTP_200_OK)
+
+
+class StudentWithoutGpsView(BaseStudentView):
+    def get(self, request):
+        queryset = get_student_queryset_for_user(request.user).filter(dispositivo_gps__isnull=True)
+        return Response(StudentListSerializer(queryset.order_by("apellidos", "nombres"), many=True).data, status=status.HTTP_200_OK)
 
 
 class TutorListCreateView(BaseAdminView):
