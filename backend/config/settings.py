@@ -84,6 +84,14 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 BULLYING_SIMULATION_DIR = Path(os.getenv("BULLYING_SIMULATION_DIR", str(MEDIA_ROOT / "bullying-videos")))
+BULLYING_AI_ENABLED = os.getenv("BULLYING_AI_ENABLED", "False").lower() == "true"
+BULLYING_AI_PROVIDER = os.getenv("BULLYING_AI_PROVIDER", "yolo_violence")
+BULLYING_AI_MODEL_PATH = Path(
+    os.getenv("BULLYING_AI_MODEL_PATH", str(BASE_DIR / "ai_models" / "bullying-yolo.pt"))
+)
+BULLYING_AI_DEVICE = os.getenv("BULLYING_AI_DEVICE", "cpu")
+BULLYING_AI_FRAME_STRIDE = int(os.getenv("BULLYING_AI_FRAME_STRIDE", "8"))
+BULLYING_AI_ALERT_THRESHOLD = float(os.getenv("BULLYING_AI_ALERT_THRESHOLD", "0.72"))
 FIREBASE_ADMIN_CREDENTIALS = Path(
     os.getenv(
         "FIREBASE_ADMIN_CREDENTIALS",
