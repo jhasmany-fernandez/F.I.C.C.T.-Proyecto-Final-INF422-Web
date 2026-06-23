@@ -83,6 +83,13 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+BULLYING_SIMULATION_DIR = Path(os.getenv("BULLYING_SIMULATION_DIR", str(MEDIA_ROOT / "bullying-videos")))
+FIREBASE_ADMIN_CREDENTIALS = Path(
+    os.getenv(
+        "FIREBASE_ADMIN_CREDENTIALS",
+        str(BASE_DIR.parent / "colegio-afad5-firebase-adminsdk-fbsvc-083efdca37.json"),
+    )
+)
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "users.User"

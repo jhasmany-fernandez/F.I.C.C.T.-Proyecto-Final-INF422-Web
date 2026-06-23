@@ -1,8 +1,11 @@
 import logging
+import json
 import math
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, time, timedelta
+from pathlib import Path
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.db import transaction
@@ -16,7 +19,11 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import (
+    AccessControlRecord,
+    AccessControlRecordType,
     AlertType,
+    BullyingVideoAnalysis,
+    BullyingVideoAnalysisResult,
     Child,
     ChildStatus,
     StudentHistory,
@@ -38,6 +45,7 @@ from .models import (
     SecurityAlertHistoryAction,
     SecurityAlertPriority,
     SecurityAlertStatus,
+    PickupRecord,
     MobileAccountStatus,
     Module,
     Permission,
@@ -59,6 +67,12 @@ from .models import (
 )
 from .permissions import IsAdminOrRegentRole, IsAdminRole, IsMobileRole, IsMonitoringRole
 from .serializers import (
+    AccessControlRecordRegisterSerializer,
+    AccessControlRecordSerializer,
+    BullyingVideoAnalysisSerializer,
+    BullyingVideoSimulationProcessSerializer,
+    BullyingVideoUploadSerializer,
+    MobileDeviceTokenSerializer,
     ChildDetailSerializer,
     ChildListSerializer,
     ChildStatusSerializer,
@@ -87,6 +101,8 @@ from .serializers import (
     MonitoringAnalyzeSerializer,
     MonitoringConfigSerializer,
     MonitoringCurrentStatusSerializer,
+    PickupConfirmSerializer,
+    PickupRecordSerializer,
     SecurityAlertCreateSerializer,
     SecurityAlertHistorySerializer,
     SecurityAlertStatusSerializer,
@@ -128,6 +144,14 @@ from .serializers import (
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging
+except Exception:  # pragma: no cover
+    firebase_admin = None
+    credentials = None
+    messaging = None
+
 
 class LoginView(APIView):
     authentication_classes = []
@@ -153,6 +177,9 @@ class LoginView(APIView):
                 return Response({"message": "Contraseña incorrecta."}, status=status.HTTP_401_UNAUTHORIZED)
             if not user.is_active:
                 return Response({"message": "Tu cuenta se encuentra inactiva."}, status=status.HTTP_403_FORBIDDEN)
+
+            if client_platform == "mobile" and user.rol not in {UserRole.TUTOR, UserRole.REGENTE}:
+                return Response({"message": "Rol no autorizado para acceso móvil."}, status=status.HTTP_403_FORBIDDEN)
 
             if client_platform != "mobile" and user.rol not in {UserRole.ADMIN, UserRole.REGENTE}:
                 return Response({"message": "Rol no autorizado para acceso web."}, status=status.HTTP_403_FORBIDDEN)
@@ -199,6 +226,10 @@ class BaseMobileView(APIView):
 
 class BaseMonitoringView(APIView):
     permission_classes = [IsMonitoringRole]
+
+
+class BaseAdminOrRegentView(BaseAdminView):
+    permission_classes = [IsAdminOrRegentRole]
 
 
 def quantize_measure(value: float) -> Decimal:
@@ -473,6 +504,34 @@ def calculate_polygon_center(points: list[tuple[float, float]]):
     }
 
 
+def filter_pickups_by_date(queryset, raw_date: str | None):
+    if not raw_date:
+        return queryset, None
+
+    selected_date = parse_date(raw_date)
+    if selected_date is None:
+        return None, "La fecha enviada es inválida. Use el formato YYYY-MM-DD."
+
+    current_tz = timezone.get_current_timezone()
+    start_of_day = timezone.make_aware(datetime.combine(selected_date, time.min), current_tz)
+    end_of_day = start_of_day + timedelta(days=1)
+    return queryset.filter(confirmed_at__gte=start_of_day, confirmed_at__lt=end_of_day), None
+
+
+def filter_access_records_by_date(queryset, raw_date: str | None):
+    if not raw_date:
+        return queryset, None
+
+    selected_date = parse_date(raw_date)
+    if selected_date is None:
+        return None, "La fecha enviada es inválida. Use el formato YYYY-MM-DD."
+
+    current_tz = timezone.get_current_timezone()
+    start_of_day = timezone.make_aware(datetime.combine(selected_date, time.min), current_tz)
+    end_of_day = start_of_day + timedelta(days=1)
+    return queryset.filter(recorded_at__gte=start_of_day, recorded_at__lt=end_of_day), None
+
+
 def create_safe_area_history(
     *,
     safe_area: SafeArea | None,
@@ -731,7 +790,324 @@ def get_security_alert_title(alert_type: str) -> str:
         AlertType.SALIDA_AREA_SEGURA: "Salida del área segura",
         AlertType.INGRESO_ZONA_RIESGO: "Ingreso a zona de riesgo",
         AlertType.ERROR_MONITOREO: "Error de monitoreo",
+        AlertType.BULLYING_DETECTADO: "Bullying detectado",
     }.get(alert_type, "Alerta de seguridad")
+
+
+def get_bullying_simulation_directory() -> Path:
+    directory = Path(settings.BULLYING_SIMULATION_DIR)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def get_bullying_simulation_children_scope(user: User):
+    queryset = Child.objects.select_related("centro_educativo", "dispositivo_gps").filter(status=ChildStatus.ACTIVO)
+    if user.rol == UserRole.ADMIN:
+        return queryset
+    if user.rol == UserRole.REGENTE:
+        return queryset.filter(centro_educativo__regent=user)
+    return Child.objects.none()
+
+
+def list_bullying_simulation_video_paths():
+    directory = get_bullying_simulation_directory()
+    allowed_extensions = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+    return [
+        path
+        for path in sorted(directory.rglob("*"))
+        if path.is_file() and path.suffix.lower() in allowed_extensions
+    ]
+
+
+def load_bullying_simulation_metadata(video_path: Path):
+    metadata_path = video_path.with_suffix(".json")
+    if not metadata_path.exists():
+        return {}
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.warning("No se pudo leer metadata de simulacion para %s", video_path)
+        return {}
+
+
+def infer_bullying_simulation_result(video_path: Path, metadata: dict):
+    valid_results = {choice for choice, _ in BullyingVideoAnalysisResult.choices}
+    result = metadata.get("result")
+    if result not in valid_results:
+        filename = video_path.stem.lower()
+        keywords = ("bullying", "bulling", "pelea", "agresion", "violencia", "acoso", "fight")
+        result = (
+            BullyingVideoAnalysisResult.BULLYING_DETECTADO
+            if any(keyword in filename for keyword in keywords)
+            else BullyingVideoAnalysisResult.NORMAL
+        )
+
+    confidence = metadata.get("confidence")
+    if not isinstance(confidence, (int, float)):
+        confidence = 0.93 if result == BullyingVideoAnalysisResult.BULLYING_DETECTADO else 0.16
+
+    event_timestamp_seconds = metadata.get("event_timestamp_seconds")
+    if not isinstance(event_timestamp_seconds, int) or event_timestamp_seconds < 0:
+        event_timestamp_seconds = 18 if result == BullyingVideoAnalysisResult.BULLYING_DETECTADO else None
+
+    summary = (metadata.get("summary") or "").strip()
+    if not summary:
+        summary = (
+            "Posible agresión física detectada en el aula durante la simulación."
+            if result == BullyingVideoAnalysisResult.BULLYING_DETECTADO
+            else "No se detectaron eventos compatibles con bullying en el video analizado."
+        )
+
+    priority = metadata.get("priority")
+    valid_priorities = {choice for choice, _ in SecurityAlertPriority.choices}
+    if priority not in valid_priorities:
+        priority = (
+            SecurityAlertPriority.ALTA
+            if result == BullyingVideoAnalysisResult.BULLYING_DETECTADO
+            else SecurityAlertPriority.BAJA
+        )
+
+    return {
+        "result": result,
+        "confidence": round(float(confidence), 2),
+        "event_timestamp_seconds": event_timestamp_seconds,
+        "summary": summary,
+        "priority": priority,
+        "classroom": (metadata.get("classroom") or "").strip(),
+        "raw_metadata": metadata,
+    }
+
+
+def serialize_bullying_simulation_video(video_path: Path):
+    directory = get_bullying_simulation_directory()
+    metadata = load_bullying_simulation_metadata(video_path)
+    inferred = infer_bullying_simulation_result(video_path, metadata)
+    relative_name = video_path.relative_to(directory).as_posix()
+    metadata_path = video_path.with_suffix(".json")
+    return {
+        "name": relative_name,
+        "size_bytes": video_path.stat().st_size,
+        "metadata_file": metadata_path.name if metadata_path.exists() else None,
+        "expected_result": inferred["result"],
+        "confidence_hint": inferred["confidence"],
+        "summary_hint": inferred["summary"],
+        "classroom": inferred["classroom"],
+    }
+
+
+def resolve_bullying_simulation_video(video_name: str):
+    normalized = Path(video_name).as_posix().lstrip("/")
+    directory = get_bullying_simulation_directory()
+    for video_path in list_bullying_simulation_video_paths():
+        if video_path.relative_to(directory).as_posix() == normalized:
+            return video_path
+    return None
+
+
+def get_or_create_simulation_location(*, child: Child, user: User):
+    location = GeographicLocation.objects.filter(child=child).order_by("-device_timestamp", "-created_at").first()
+    if location is not None:
+        return location
+
+    gps_device = child.dispositivo_gps
+    if gps_device is None:
+        device_code = f"SIM-{child.code}".upper()[:40]
+        gps_device, _ = GPSDevice.objects.update_or_create(
+            code=device_code,
+            defaults={
+                "serial_number": f"SIM-{child.code}".upper()[:80],
+                "model": "GPS Demo Simulacion",
+                "imei": f"990{child.id:012d}"[:30],
+                "status": GPSDeviceStatus.ASIGNADO,
+                "battery_level": 100,
+                "is_active": True,
+                "created_by": user,
+                "updated_by": user,
+            },
+        )
+        if child.dispositivo_gps_id != gps_device.id:
+            child.dispositivo_gps = gps_device
+            child.updated_by = user
+            child.save(update_fields=["dispositivo_gps", "updated_by", "fecha_actualizacion"])
+
+    center = child.centro_educativo
+    base_latitude = center.latitude if center and center.latitude is not None else Decimal("-17.783327")
+    base_longitude = center.longitude if center and center.longitude is not None else Decimal("-63.182140")
+    offset = Decimal(child.id % 10) * Decimal("0.0001")
+
+    latitude = (Decimal(base_latitude) + offset).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    longitude = (Decimal(base_longitude) + offset).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    now = timezone.now()
+
+    return GeographicLocation.objects.create(
+        device=gps_device,
+        child=child,
+        latitude=latitude,
+        longitude=longitude,
+        precision=8.0,
+        speed=0.0,
+        device_timestamp=now,
+        delivery_status=LocationDeliveryStatus.ENVIADO,
+        inside_safe_area=True,
+        created_by=user,
+        source_host="simulation-video",
+    )
+
+
+def get_firebase_admin_app():
+    if firebase_admin is None or credentials is None:
+        return None
+    try:
+        return firebase_admin.get_app()
+    except ValueError:
+        credential_path = Path(settings.FIREBASE_ADMIN_CREDENTIALS)
+        if not credential_path.exists():
+            logger.warning("No se encontró la credencial Firebase Admin: %s", credential_path)
+            return None
+        try:
+            return firebase_admin.initialize_app(credentials.Certificate(str(credential_path)))
+        except Exception:
+            logger.exception("No se pudo inicializar Firebase Admin")
+            return None
+
+
+def send_bullying_notification_to_regent(*, alert: MonitoringAlert):
+    if messaging is None:
+        return
+    educational_center = alert.educational_center or alert.child.centro_educativo
+    regent = educational_center.regent if educational_center else None
+    token = (regent.mobile_push_token or "").strip() if regent else ""
+    if not token:
+        return
+
+    app = get_firebase_admin_app()
+    if app is None:
+        return
+
+    classroom = ""
+    if isinstance(alert.metadata, dict):
+        classroom = str(alert.metadata.get("classroom") or "").strip()
+
+    title = "Alerta de bullying detectada"
+    body_parts = [alert.child.nombre_completo]
+    if classroom:
+        body_parts.append(classroom)
+    body = " / ".join(body_parts)
+
+    try:
+        messaging.send(
+            messaging.Message(
+                token=token,
+                notification=messaging.Notification(
+                    title=title,
+                    body=body,
+                ),
+                data={
+                    "type": "BULLYING_DETECTADO",
+                    "alert_id": str(alert.id),
+                    "child_id": str(alert.child_id),
+                    "educational_center_id": str(educational_center.id if educational_center else ""),
+                    "classroom": classroom,
+                },
+                android=messaging.AndroidConfig(priority="high"),
+            ),
+            app=app,
+        )
+    except Exception:
+        logger.exception("No se pudo enviar push FCM al regente para alerta %s", alert.id)
+
+
+def execute_bullying_simulation_analysis(*, child: Child, video_path: Path, user: User):
+    location = get_or_create_simulation_location(child=child, user=user)
+
+    monitoring_history = MonitoringHistory.objects.filter(
+        child=child,
+        location_record=location,
+    ).order_by("-created_at").first()
+    metadata = load_bullying_simulation_metadata(video_path)
+    inferred = infer_bullying_simulation_result(video_path, metadata)
+
+    generated_alert = None
+    if inferred["result"] == BullyingVideoAnalysisResult.BULLYING_DETECTADO:
+        config = get_monitoring_config()
+        cutoff = timezone.now() - timedelta(minutes=config.min_time_between_alerts_min)
+        generated_alert = MonitoringAlert.objects.filter(
+            child=child,
+            alert_type=AlertType.BULLYING_DETECTADO,
+            detected_at__gte=cutoff,
+            is_active=True,
+        ).order_by("-created_at").first()
+
+        if generated_alert is None:
+            event_datetime = timezone.now()
+            if inferred["event_timestamp_seconds"] is not None:
+                event_datetime = location.device_timestamp + timedelta(seconds=inferred["event_timestamp_seconds"])
+            generated_alert = MonitoringAlert.objects.create(
+                child=child,
+                educational_center=child.centro_educativo,
+                gps_device=child.dispositivo_gps,
+                location_record=location,
+                monitoring_history=monitoring_history,
+                risk_zone=monitoring_history.risk_zone if monitoring_history else None,
+                alert_type=AlertType.BULLYING_DETECTADO,
+                priority=inferred["priority"],
+                workflow_status=SecurityAlertStatus.PENDIENTE,
+                title=get_security_alert_title(AlertType.BULLYING_DETECTADO),
+                description=inferred["summary"],
+                reason=inferred["summary"],
+                status=monitoring_history.status if monitoring_history else MonitoringStatus.PENDIENTE,
+                latitude=location.latitude,
+                longitude=location.longitude,
+                accuracy=location.precision,
+                speed=location.speed,
+                event_datetime=event_datetime,
+                detected_at=timezone.now(),
+                created_by=user,
+                active=True,
+                is_active=True,
+                metadata={
+                    "simulation_source": "video_folder",
+                    "video_name": video_path.name,
+                    "video_relative_path": video_path.relative_to(get_bullying_simulation_directory()).as_posix(),
+                    "event_timestamp_seconds": inferred["event_timestamp_seconds"],
+                    "confidence": inferred["confidence"],
+                    "classroom": inferred["classroom"],
+                },
+            )
+            create_security_alert_history(
+                alert=generated_alert,
+                action=SecurityAlertHistoryAction.CREADA,
+                previous_status=None,
+                new_status=SecurityAlertStatus.PENDIENTE,
+                comment="Alerta generada automáticamente por simulación de bullying en video.",
+                changed_by=user,
+                metadata={"simulation": True, "video_name": video_path.name},
+            )
+            send_bullying_notification_to_regent(alert=generated_alert)
+        if monitoring_history and monitoring_history.alert_id is None:
+            monitoring_history.alert = generated_alert
+            monitoring_history.save(update_fields=["alert"])
+
+    analysis = BullyingVideoAnalysis.objects.create(
+        child=child,
+        educational_center=child.centro_educativo,
+        source_video_name=video_path.name,
+        source_video_path=video_path.relative_to(get_bullying_simulation_directory()).as_posix(),
+        source_folder=str(get_bullying_simulation_directory()),
+        result=inferred["result"],
+        confidence=inferred["confidence"],
+        event_timestamp_seconds=inferred["event_timestamp_seconds"],
+        summary=inferred["summary"],
+        metadata={
+            **inferred["raw_metadata"],
+            "classroom": inferred["classroom"],
+            "priority": inferred["priority"],
+        },
+        generated_alert=generated_alert,
+        created_by=user,
+    )
+    return analysis, generated_alert, None
 
 
 def get_security_alerts_scope(user: User):
@@ -2726,6 +3102,321 @@ class MobileLocationContextView(BaseMobileView):
         )
 
 
+class MobilePickupChildrenView(BaseMobileView):
+    def get(self, request):
+        children = list(get_mobile_children_scope(request.user).filter(status=ChildStatus.ACTIVO))
+
+        return Response(
+            {
+                "success": True,
+                "message": "Listado de niños para retiro obtenido correctamente.",
+                "data": [
+                    {
+                        "id": child.id,
+                        "full_name": child.nombre_completo,
+                        "course": child.curso,
+                        "educational_center": child.centro_educativo.name,
+                        "connection_status": "Disponible",
+                        "last_updated_at": child.fecha_actualizacion.isoformat(),
+                        "photo_url": request.build_absolute_uri(child.foto.url) if child.foto else None,
+                        "status": {
+                            "code": child.status,
+                            "label": child.get_status_display(),
+                            "description": "Disponible para retiro",
+                            "distance_to_safe_area_m": 0,
+                        },
+                    }
+                    for child in children
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MobileAccessChildrenView(BaseMobileView):
+    def get(self, request):
+        if request.user.rol != UserRole.REGENTE:
+            return mobile_error_response(
+                "Solo el regente puede consultar niños para ingreso y asistencia.",
+                "ROL_NO_PERMITIDO",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        children = list(get_mobile_children_scope(request.user).filter(status=ChildStatus.ACTIVO))
+        return Response(
+            {
+                "success": True,
+                "message": "Listado de niños para control obtenido correctamente.",
+                "data": [
+                    {
+                        "id": child.id,
+                        "full_name": child.nombre_completo,
+                        "course": child.curso,
+                        "educational_center": child.centro_educativo.name,
+                        "connection_status": "Disponible",
+                        "last_updated_at": child.fecha_actualizacion.isoformat(),
+                        "photo_url": request.build_absolute_uri(child.foto.url) if child.foto else None,
+                        "status": {
+                            "code": child.status,
+                            "label": child.get_status_display(),
+                            "description": "Disponible para control",
+                            "distance_to_safe_area_m": 0,
+                        },
+                    }
+                    for child in children
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MobileAccessControlRegisterView(BaseMobileView):
+    def post(self, request):
+        if request.user.rol != UserRole.REGENTE:
+            return mobile_error_response(
+                "Solo el regente puede registrar ingresos o asistencias.",
+                "ROL_NO_PERMITIDO",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = AccessControlRecordRegisterSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "success": False,
+                    "message": "Datos inválidos.",
+                    "code": "DATOS_INVALIDOS",
+                    "details": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        child = (
+            get_mobile_children_scope(request.user)
+            .filter(id=serializer.validated_data["child_id"], status=ChildStatus.ACTIVO)
+            .first()
+        )
+        if child is None:
+            return mobile_error_response(
+                "No tiene permisos para registrar este niño.",
+                "NINO_NO_PERMITIDO",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        record = AccessControlRecord.objects.create(
+            child=child,
+            recorded_by=request.user,
+            record_type=serializer.validated_data["record_type"],
+            note=serializer.validated_data.get("note", "").strip(),
+            source_platform="mobile",
+        )
+        return Response(
+            {
+                "success": True,
+                "message": "Registro guardado correctamente.",
+                "data": AccessControlRecordSerializer(record).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class MobileAccessControlHistoryView(BaseMobileView):
+    def get(self, request):
+        if request.user.rol != UserRole.REGENTE:
+            return mobile_error_response(
+                "Solo el regente puede consultar estos registros.",
+                "ROL_NO_PERMITIDO",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        queryset = AccessControlRecord.objects.select_related("child__centro_educativo", "recorded_by")
+        queryset = queryset.filter(child__centro_educativo__regent=request.user)
+
+        child_id = request.query_params.get("child_id")
+        record_type = request.query_params.get("record_type", "").strip().upper()
+        raw_date = request.query_params.get("date")
+
+        if child_id:
+            queryset = queryset.filter(child_id=child_id)
+        if record_type in {AccessControlRecordType.INGRESO, AccessControlRecordType.ASISTENCIA}:
+            queryset = queryset.filter(record_type=record_type)
+        queryset, date_error = filter_access_records_by_date(queryset, raw_date)
+        if date_error:
+            return Response(
+                {"success": False, "message": date_error, "code": "FECHA_INVALIDA"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Historial de control obtenido correctamente.",
+                "data": AccessControlRecordSerializer(queryset[:100], many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MobilePickupConfirmView(BaseMobileView):
+    def post(self, request):
+        if request.user.rol != UserRole.TUTOR:
+            return mobile_error_response(
+                "Solo los tutores pueden confirmar retiros.",
+                "ROL_NO_PERMITIDO",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = PickupConfirmSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "success": False,
+                    "message": "Datos inválidos.",
+                    "code": "DATOS_INVALIDOS",
+                    "details": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        tutor = Tutor.objects.filter(
+            correo_acceso__iexact=request.user.email,
+            estado=TutorStatus.ACTIVO,
+        ).first()
+        if tutor is None:
+            return mobile_error_response(
+                "Tutor no encontrado o inactivo.",
+                "TUTOR_NO_ENCONTRADO",
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        child = (
+            get_mobile_children_scope(request.user)
+            .filter(id=serializer.validated_data["child_id"], status=ChildStatus.ACTIVO)
+            .first()
+        )
+        if child is None:
+            return mobile_error_response(
+                "No tiene permisos para confirmar el retiro de este niño.",
+                "NINO_NO_PERMITIDO",
+                status.HTTP_403_FORBIDDEN,
+                {"child_id": serializer.validated_data["child_id"]},
+            )
+
+        pickup = PickupRecord.objects.create(
+            child=child,
+            tutor=tutor,
+            confirmed_by=request.user,
+            biometric_method=serializer.validated_data["biometric_method"],
+            source_platform="mobile",
+            note=serializer.validated_data.get("note", "").strip(),
+        )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Retiro confirmado correctamente.",
+                "data": PickupRecordSerializer(pickup).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class MobilePickupHistoryView(BaseMobileView):
+    def get(self, request):
+        child_id = request.query_params.get("child_id")
+        raw_date = request.query_params.get("date")
+        queryset = PickupRecord.objects.select_related("child__centro_educativo", "tutor")
+
+        if request.user.rol == UserRole.TUTOR:
+            tutor = Tutor.objects.filter(correo_acceso__iexact=request.user.email).first()
+            if tutor is None:
+                return Response({"success": True, "data": []}, status=status.HTTP_200_OK)
+            queryset = queryset.filter(tutor=tutor)
+        elif request.user.rol == UserRole.REGENTE:
+            queryset = queryset.filter(child__centro_educativo__regent=request.user)
+        else:
+            return mobile_error_response(
+                "Rol no permitido para consultar retiros.",
+                "ROL_NO_PERMITIDO",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        if child_id:
+            queryset = queryset.filter(child_id=child_id)
+        queryset, date_error = filter_pickups_by_date(queryset, raw_date)
+        if date_error:
+            return Response(
+                {
+                    "success": False,
+                    "message": date_error,
+                    "code": "FECHA_INVALIDA",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Historial de retiros obtenido correctamente.",
+                "data": PickupRecordSerializer(queryset[:50], many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class PickupRecordListView(BaseAdminOrRegentView):
+    def get(self, request):
+        queryset = PickupRecord.objects.select_related("child__centro_educativo", "tutor")
+
+        child_id = request.query_params.get("child_id")
+        tutor_id = request.query_params.get("tutor_id")
+        raw_date = request.query_params.get("date")
+        if request.user.rol == UserRole.REGENTE:
+            queryset = queryset.filter(child__centro_educativo__regent=request.user)
+        if child_id:
+            queryset = queryset.filter(child_id=child_id)
+        if tutor_id:
+            queryset = queryset.filter(tutor_id=tutor_id)
+        queryset, date_error = filter_pickups_by_date(queryset, raw_date)
+        if date_error:
+            return Response({"message": date_error}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "message": "Retiros obtenidos correctamente.",
+                "data": PickupRecordSerializer(queryset[:100], many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AccessControlRecordListView(BaseAdminOrRegentView):
+    def get(self, request):
+        queryset = AccessControlRecord.objects.select_related("child__centro_educativo", "recorded_by")
+        if request.user.rol == UserRole.REGENTE:
+            queryset = queryset.filter(child__centro_educativo__regent=request.user)
+
+        child_id = request.query_params.get("child_id")
+        record_type = request.query_params.get("record_type", "").strip().upper()
+        raw_date = request.query_params.get("date")
+
+        if child_id:
+            queryset = queryset.filter(child_id=child_id)
+        if record_type in {AccessControlRecordType.INGRESO, AccessControlRecordType.ASISTENCIA}:
+            queryset = queryset.filter(record_type=record_type)
+        queryset, date_error = filter_access_records_by_date(queryset, raw_date)
+        if date_error:
+            return Response({"message": date_error}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "message": "Registros obtenidos correctamente.",
+                "data": AccessControlRecordSerializer(queryset[:100], many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class GeographicLocationRegisterView(BaseMobileView):
     @transaction.atomic
     def post(self, request):
@@ -3365,6 +4056,134 @@ class SecurityAlertStatsView(BaseMonitoringView):
             "by_status": {choice: queryset.filter(workflow_status=choice).count() for choice, _ in SecurityAlertStatus.choices},
         }
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class BullyingSimulationVideoOptionsView(BaseAdminOrRegentView):
+    def get(self, request):
+        children = get_bullying_simulation_children_scope(request.user).order_by("apellidos", "nombres")
+        return Response(
+            {
+                "message": "Opciones de simulación obtenidas correctamente.",
+                "data": {
+                    "folder": str(get_bullying_simulation_directory()),
+                    "videos": [serialize_bullying_simulation_video(path) for path in list_bullying_simulation_video_paths()],
+                    "children": [
+                        {
+                            "id": child.id,
+                            "code": child.code,
+                            "nombre_completo": child.nombre_completo,
+                            "curso": child.curso,
+                            "centro_educativo": child.centro_educativo.name,
+                        }
+                        for child in children
+                    ],
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MobileDeviceTokenView(BaseMobileView):
+    def post(self, request):
+        serializer = MobileDeviceTokenSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"message": "Datos inválidos.", "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request.user.mobile_push_token = serializer.validated_data["token"].strip()
+        request.user.mobile_push_platform = serializer.validated_data.get("platform", "").strip()
+        request.user.mobile_push_updated_at = timezone.now()
+        request.user.save(update_fields=["mobile_push_token", "mobile_push_platform", "mobile_push_updated_at"])
+
+        return Response(
+            {"message": "Token del dispositivo registrado correctamente."},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request):
+        request.user.mobile_push_token = ""
+        request.user.mobile_push_platform = ""
+        request.user.mobile_push_updated_at = timezone.now()
+        request.user.save(update_fields=["mobile_push_token", "mobile_push_platform", "mobile_push_updated_at"])
+        return Response({"message": "Token del dispositivo eliminado correctamente."}, status=status.HTTP_200_OK)
+
+
+class BullyingSimulationAnalysisView(BaseAdminOrRegentView):
+    def get_queryset(self, user: User):
+        queryset = BullyingVideoAnalysis.objects.select_related(
+            "child",
+            "educational_center",
+            "generated_alert",
+        )
+        if user.rol == UserRole.REGENTE:
+            queryset = queryset.filter(educational_center__regent=user)
+        return queryset
+
+    def get(self, request):
+        queryset = self.get_queryset(request.user)
+        child_id = (request.query_params.get("child_id") or "").strip()
+        result = (request.query_params.get("result") or "").strip()
+        if child_id:
+            queryset = queryset.filter(child_id=child_id)
+        if result:
+            queryset = queryset.filter(result=result)
+        serializer = BullyingVideoAnalysisSerializer(queryset[:100], many=True)
+        return Response(
+            {
+                "message": "Historial de simulaciones obtenido correctamente.",
+                "data": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @transaction.atomic
+    def post(self, request):
+        if request.user.rol != UserRole.ADMIN:
+            return Response(
+                {"message": "Solo el administrador puede procesar videos de simulación."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = BullyingVideoSimulationProcessSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"message": "Datos inválidos.", "details": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        child = get_bullying_simulation_children_scope(request.user).filter(
+            id=serializer.validated_data["child_id"]
+        ).first()
+        if child is None:
+            return Response({"message": "Estudiante no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        video_path = resolve_bullying_simulation_video(serializer.validated_data["video_name"])
+        if video_path is None:
+            return Response(
+                {"message": "El video seleccionado no existe en la carpeta configurada."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        analysis, generated_alert, error_message = execute_bullying_simulation_analysis(
+            child=child,
+            video_path=video_path,
+            user=request.user,
+        )
+        if error_message:
+            return Response({"message": error_message}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "message": (
+                    "Video procesado y alerta de bullying generada correctamente."
+                    if generated_alert is not None
+                    else "Video procesado. No se detectaron incidentes de bullying."
+                ),
+                "data": BullyingVideoAnalysisSerializer(analysis).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class SecurityAlertsByChildView(BaseMonitoringView):

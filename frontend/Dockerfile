@@ -7,7 +7,8 @@ RUN npm install
 
 COPY . .
 
-RUN chmod +x /app/start-dev.sh
+RUN sed -i 's/\r$//' /app/start-dev.sh \
+    && chmod +x /app/start-dev.sh
 
 EXPOSE 5656
 

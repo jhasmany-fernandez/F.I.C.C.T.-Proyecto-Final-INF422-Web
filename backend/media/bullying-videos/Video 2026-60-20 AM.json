@@ -1,0 +1,8 @@
+{
+  "result": "BULLYING_DETECTADO",
+  "confidence": 0.89,
+  "event_timestamp_seconds": 22,
+  "summary": "Posible incidente de agresion fisica detectado durante el recreo.",
+  "priority": "ALTA",
+  "classroom": "Patio Recreo"
+}

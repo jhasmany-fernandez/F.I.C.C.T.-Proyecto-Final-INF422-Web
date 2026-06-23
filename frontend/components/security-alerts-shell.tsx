@@ -269,6 +269,7 @@ export function SecurityAlertsShell() {
             <option value="SALIDA_AREA_SEGURA">Salida área segura</option>
             <option value="INGRESO_ZONA_RIESGO">Ingreso zona riesgo</option>
             <option value="ERROR_MONITOREO">Error monitoreo</option>
+            <option value="BULLYING_DETECTADO">Bullying detectado</option>
           </select>
           <select
             value={draftFilters.status}

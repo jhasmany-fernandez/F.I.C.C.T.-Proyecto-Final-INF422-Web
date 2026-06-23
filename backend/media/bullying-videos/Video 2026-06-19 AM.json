@@ -1,0 +1,8 @@
+{
+  "result": "BULLYING_DETECTADO",
+  "confidence": 0.84,
+  "event_timestamp_seconds": 11,
+  "summary": "Posible empujon entre estudiantes dentro del aula.",
+  "priority": "MEDIA",
+  "classroom": "Aula 3ro A"
+}

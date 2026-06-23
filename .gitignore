@@ -231,6 +231,11 @@ frontend/*.tsbuildinfo
 # Backend (Django)
 backend/media/
 backend/staticfiles/
+!backend/media/
+!backend/media/bullying-videos/
+!backend/media/bullying-videos/**
+colegio-afad5-firebase-adminsdk-fbsvc-083efdca37.json
+backend/colegio-afad5-firebase-adminsdk-fbsvc-083efdca37.json
 
 # Archivos temporales locales del repositorio
 .tmp-*.py

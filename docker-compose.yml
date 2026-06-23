@@ -23,11 +23,12 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: sistema_escolar_backend
-    command: ["sh", "/app/start.sh"]
+    command: ["sh", "-c", "sed -i 's/\\r$//' /app/start.sh && exec sh /app/start.sh"]
     env_file:
       - ./backend/.env
     volumes:
       - ./backend:/app
+      - ./colegio-afad5-firebase-adminsdk-fbsvc-083efdca37.json:/app/colegio-afad5-firebase-adminsdk-fbsvc-083efdca37.json:ro
     ports:
       - "8787:8787"
     depends_on:
@@ -38,6 +39,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    command: ["sh", "-c", "sed -i 's/\\r$//' /app/start-dev.sh && exec sh /app/start-dev.sh"]
     container_name: sistema_escolar_frontend
     env_file:
       - ./frontend/.env.local

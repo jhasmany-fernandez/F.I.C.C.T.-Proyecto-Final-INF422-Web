@@ -7,6 +7,10 @@ from django.db.models import Max
 from rest_framework import serializers
 
 from .models import (
+    AccessControlRecord,
+    AccessControlRecordType,
+    BullyingVideoAnalysis,
+    BullyingVideoAnalysisResult,
     Child,
     ChildStatus,
     StudentGender,
@@ -35,6 +39,8 @@ from .models import (
     MonitoringHistory,
     MonitoringStatus,
     LocationDeliveryStatus,
+    PickupBiometricMethod,
+    PickupRecord,
     SecurityAlertHistory,
     SecurityAlertHistoryAction,
     SecurityAlertPriority,
@@ -53,6 +59,92 @@ from .models import (
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
     password = serializers.CharField(required=True, write_only=True, trim_whitespace=False)
+
+
+class PickupConfirmSerializer(serializers.Serializer):
+    child_id = serializers.IntegerField(min_value=1)
+    biometric_method = serializers.ChoiceField(
+        choices=PickupBiometricMethod.choices,
+        default=PickupBiometricMethod.BIOMETRIA,
+    )
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+
+class PickupRecordSerializer(serializers.ModelSerializer):
+    child = serializers.SerializerMethodField()
+    tutor = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PickupRecord
+        fields = (
+            "id",
+            "child",
+            "tutor",
+            "biometric_method",
+            "source_platform",
+            "note",
+            "confirmed_at",
+        )
+
+    def get_child(self, obj: PickupRecord):
+        return {
+            "id": obj.child_id,
+            "code": obj.child.code,
+            "nombre_completo": obj.child.nombre_completo,
+            "curso": obj.child.curso,
+            "centro_educativo": obj.child.centro_educativo.name,
+        }
+
+    def get_tutor(self, obj: PickupRecord):
+        return {
+            "id": obj.tutor_id,
+            "nombre_completo": obj.tutor.nombre_completo,
+            "correo_electronico": obj.tutor.correo_electronico,
+            "correo_acceso": obj.tutor.correo_acceso,
+            "telefono": obj.tutor.telefono,
+        }
+
+
+class AccessControlRecordRegisterSerializer(serializers.Serializer):
+    child_id = serializers.IntegerField(min_value=1)
+    record_type = serializers.ChoiceField(choices=AccessControlRecordType.choices)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+
+class AccessControlRecordSerializer(serializers.ModelSerializer):
+    child = serializers.SerializerMethodField()
+    recorded_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AccessControlRecord
+        fields = (
+            "id",
+            "child",
+            "recorded_by",
+            "record_type",
+            "source_platform",
+            "note",
+            "recorded_at",
+        )
+
+    def get_child(self, obj: AccessControlRecord):
+        return {
+            "id": obj.child_id,
+            "code": obj.child.code,
+            "nombre_completo": obj.child.nombre_completo,
+            "curso": obj.child.curso,
+            "centro_educativo": obj.child.centro_educativo.name,
+        }
+
+    def get_recorded_by(self, obj: AccessControlRecord):
+        if obj.recorded_by is None:
+            return None
+        return {
+            "id": obj.recorded_by_id,
+            "nombre": obj.recorded_by.nombre,
+            "rol": obj.recorded_by.rol,
+            "email": obj.recorded_by.email,
+        }
 
 
 def map_role_name_to_user_role(role: Role | None) -> str | None:
@@ -1166,6 +1258,70 @@ class SecurityAlertCreateSerializer(serializers.Serializer):
     accuracy = serializers.FloatField(required=False, allow_null=True)
     speed = serializers.FloatField(required=False, allow_null=True)
     event_datetime = serializers.DateTimeField()
+
+
+class BullyingVideoSimulationProcessSerializer(serializers.Serializer):
+    child_id = serializers.IntegerField(min_value=1)
+    video_name = serializers.CharField(max_length=180)
+
+
+class BullyingVideoUploadSerializer(serializers.Serializer):
+    child_id = serializers.IntegerField(min_value=1)
+
+
+class MobileDeviceTokenSerializer(serializers.Serializer):
+    token = serializers.CharField(max_length=255)
+    platform = serializers.CharField(max_length=30, required=False, allow_blank=True)
+
+
+class BullyingVideoAnalysisSerializer(serializers.ModelSerializer):
+    child = serializers.SerializerMethodField()
+    educational_center = serializers.SerializerMethodField()
+    generated_alert = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BullyingVideoAnalysis
+        fields = (
+            "id",
+            "child",
+            "educational_center",
+            "source_video_name",
+            "source_video_path",
+            "source_folder",
+            "detector_name",
+            "result",
+            "confidence",
+            "event_timestamp_seconds",
+            "summary",
+            "metadata",
+            "generated_alert",
+            "created_at",
+        )
+
+    def get_child(self, obj: BullyingVideoAnalysis):
+        return {
+            "id": obj.child_id,
+            "code": obj.child.code,
+            "nombre_completo": obj.child.nombre_completo,
+            "curso": obj.child.curso,
+        }
+
+    def get_educational_center(self, obj: BullyingVideoAnalysis):
+        return {
+            "id": obj.educational_center_id,
+            "name": obj.educational_center.name,
+        }
+
+    def get_generated_alert(self, obj: BullyingVideoAnalysis):
+        if obj.generated_alert is None:
+            return None
+        return {
+            "id": obj.generated_alert_id,
+            "code": obj.generated_alert.code,
+            "status": obj.generated_alert.workflow_status,
+            "alert_type": obj.generated_alert.alert_type,
+            "title": obj.generated_alert.title,
+        }
 
 
 class SecurityAlertHistorySerializer(serializers.ModelSerializer):

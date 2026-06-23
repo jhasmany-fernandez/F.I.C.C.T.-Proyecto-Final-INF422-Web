@@ -1,0 +1,8 @@
+{
+  "result": "BULLYING_DETECTADO",
+  "confidence": 0.93,
+  "event_timestamp_seconds": 17,
+  "summary": "Posible pelea fisica entre estudiantes varones detectada en el pasillo.",
+  "priority": "ALTA",
+  "classroom": "Pasillo Secundaria"
+}

@@ -1,0 +1,8 @@
+{
+  "result": "BULLYING_DETECTADO",
+  "confidence": 0.95,
+  "event_timestamp_seconds": 14,
+  "summary": "Posible pelea entre estudiantes detectada durante el cambio de clase.",
+  "priority": "ALTA",
+  "classroom": "Patio Central"
+}

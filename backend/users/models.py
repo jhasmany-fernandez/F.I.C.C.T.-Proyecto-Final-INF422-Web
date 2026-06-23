@@ -149,6 +149,7 @@ class AlertType(models.TextChoices):
     SALIDA_AREA_SEGURA = "SALIDA_AREA_SEGURA", "Salida de area segura"
     INGRESO_ZONA_RIESGO = "INGRESO_ZONA_RIESGO", "Ingreso a zona de riesgo"
     ERROR_MONITOREO = "ERROR_MONITOREO", "Error de monitoreo"
+    BULLYING_DETECTADO = "BULLYING_DETECTADO", "Bullying detectado"
 
 
 class SecurityAlertPriority(models.TextChoices):
@@ -408,6 +409,9 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
     nombre = models.CharField(max_length=150)
     rol = models.CharField(max_length=20, choices=UserRole.choices, default=UserRole.TUTOR)
+    mobile_push_token = models.CharField(max_length=255, blank=True)
+    mobile_push_platform = models.CharField(max_length=30, blank=True)
+    mobile_push_updated_at = models.DateTimeField(null=True, blank=True)
     role = models.ForeignKey(
         Role,
         on_delete=models.SET_NULL,
@@ -705,6 +709,81 @@ class ChildTutorAssociationHistory(models.Model):
 
     def __str__(self) -> str:
         return f"{self.child} - {self.tutor} - {self.action}"
+
+
+class PickupBiometricMethod(models.TextChoices):
+    BIOMETRIA = "BIOMETRIA", "Biometria del dispositivo"
+    HUELLA = "HUELLA", "Huella dactilar"
+    ROSTRO = "ROSTRO", "Reconocimiento facial"
+
+
+class PickupRecord(models.Model):
+    child = models.ForeignKey(
+        Child,
+        on_delete=models.PROTECT,
+        related_name="pickup_records",
+    )
+    tutor = models.ForeignKey(
+        Tutor,
+        on_delete=models.PROTECT,
+        related_name="pickup_records",
+    )
+    confirmed_by = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        related_name="pickup_records_confirmed",
+        null=True,
+        blank=True,
+    )
+    biometric_method = models.CharField(
+        max_length=20,
+        choices=PickupBiometricMethod.choices,
+        default=PickupBiometricMethod.BIOMETRIA,
+    )
+    source_platform = models.CharField(max_length=20, default="mobile")
+    note = models.CharField(max_length=255, blank=True)
+    confirmed_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-confirmed_at", "-id")
+
+    def __str__(self) -> str:
+        return f"{self.child.code} retirado por {self.tutor.nombre_completo}"
+
+
+class AccessControlRecordType(models.TextChoices):
+    INGRESO = "INGRESO", "Control de ingreso"
+    ASISTENCIA = "ASISTENCIA", "Registro de asistencia"
+
+
+class AccessControlRecord(models.Model):
+    child = models.ForeignKey(
+        Child,
+        on_delete=models.PROTECT,
+        related_name="access_control_records",
+    )
+    recorded_by = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        related_name="access_control_records",
+        null=True,
+        blank=True,
+    )
+    record_type = models.CharField(
+        max_length=20,
+        choices=AccessControlRecordType.choices,
+    )
+    source_platform = models.CharField(max_length=20, default="mobile")
+    note = models.CharField(max_length=255, blank=True)
+    recorded_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-recorded_at", "-id")
+
+    def __str__(self) -> str:
+        return f"{self.child.code} - {self.record_type}"
 
 
 class SafeArea(models.Model):
@@ -1023,6 +1102,8 @@ class MonitoringAlert(models.Model):
                 if self.alert_type == AlertType.SALIDA_AREA_SEGURA
                 else "Ingreso a zona de riesgo"
                 if self.alert_type == AlertType.INGRESO_ZONA_RIESGO
+                else "Bullying detectado"
+                if self.alert_type == AlertType.BULLYING_DETECTADO
                 else "Alerta de monitoreo"
             )
         if not self.description:
@@ -1032,6 +1113,55 @@ class MonitoringAlert(models.Model):
         if self.event_datetime is None:
             self.event_datetime = self.detected_at
         super().save(*args, **kwargs)
+
+
+class BullyingVideoAnalysisResult(models.TextChoices):
+    NORMAL = "NORMAL", "Normal"
+    BULLYING_DETECTADO = "BULLYING_DETECTADO", "Bullying detectado"
+
+
+class BullyingVideoAnalysis(models.Model):
+    child = models.ForeignKey(
+        Child,
+        on_delete=models.CASCADE,
+        related_name="bullying_video_analyses",
+    )
+    educational_center = models.ForeignKey(
+        EducationalCenter,
+        on_delete=models.CASCADE,
+        related_name="bullying_video_analyses",
+    )
+    source_video_name = models.CharField(max_length=180)
+    source_video_path = models.CharField(max_length=255)
+    source_folder = models.CharField(max_length=255, blank=True)
+    detector_name = models.CharField(max_length=120, default="Simulador IA Open Source")
+    result = models.CharField(max_length=30, choices=BullyingVideoAnalysisResult.choices)
+    confidence = models.FloatField(default=0)
+    event_timestamp_seconds = models.PositiveIntegerField(null=True, blank=True)
+    summary = models.CharField(max_length=255)
+    metadata = models.JSONField(default=dict, blank=True)
+    generated_alert = models.ForeignKey(
+        MonitoringAlert,
+        on_delete=models.SET_NULL,
+        related_name="bullying_video_analyses",
+        null=True,
+        blank=True,
+    )
+    created_by = models.ForeignKey(
+        "User",
+        on_delete=models.SET_NULL,
+        related_name="bullying_video_analyses_created",
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:
+        return f"{self.source_video_name} - {self.result}"
 
 
 class SecurityAlertHistory(models.Model):
