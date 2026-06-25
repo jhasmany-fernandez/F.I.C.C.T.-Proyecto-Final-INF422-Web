@@ -8,6 +8,7 @@ services:
       POSTGRES_DB: sistema_escolar
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+    restart: unless-stopped
     ports:
       - "5432:5432"
     volumes:
@@ -26,6 +27,7 @@ services:
     command: ["sh", "-c", "sed -i 's/\\r$//' /app/start-prod.sh && chmod +x /app/start-prod.sh && exec sh /app/start-prod.sh"]
     env_file:
       - ./backend/.env.prod
+    restart: unless-stopped
     ports:
       - "8787:8787"
     depends_on:
@@ -33,6 +35,8 @@ services:
         condition: service_healthy
     volumes:
       - ./colegio-afad5-firebase-adminsdk-fbsvc-083efdca37.json:/app/colegio-afad5-firebase-adminsdk-fbsvc-083efdca37.json:ro
+      - backend_media_prod:/app/media
+      - backend_static_prod:/app/staticfiles
 
   frontend:
     build:
@@ -42,6 +46,7 @@ services:
     command: ["sh", "-c", "sed -i 's/\\r$//' /app/start-prod.sh && chmod +x /app/start-prod.sh && exec sh /app/start-prod.sh"]
     env_file:
       - ./frontend/.env.production
+    restart: unless-stopped
     ports:
       - "5656:5656"
     depends_on:
@@ -49,3 +54,5 @@ services:
 
 volumes:
   postgres_data_prod:
+  backend_media_prod:
+  backend_static_prod:
