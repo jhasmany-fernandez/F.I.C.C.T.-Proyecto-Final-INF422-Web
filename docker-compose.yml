@@ -8,8 +8,6 @@ services:
       POSTGRES_DB: sistema_escolar
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -28,7 +26,7 @@ services:
       - ./backend/.env
     volumes:
       - ./backend:/app
-      - ./colegio-afad5-firebase-adminsdk-fbsvc-083efdca37.json:/app/colegio-afad5-firebase-adminsdk-fbsvc-083efdca37.json:ro
+      - ./backend/secrets/firebase-admin.json:/run/secrets/firebase-admin.json:ro
     ports:
       - "8787:8787"
     depends_on:

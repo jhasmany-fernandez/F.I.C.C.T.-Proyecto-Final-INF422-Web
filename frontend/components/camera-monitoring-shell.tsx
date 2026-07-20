@@ -13,15 +13,70 @@ import { useEffect, useMemo, useState } from "react";
 
 import { AdminShell } from "@/components/admin-shell";
 import { clearSession } from "@/lib/auth";
-import { ApiError, getBullyingSimulations } from "@/lib/api";
+import {
+  ApiError,
+  getBullyingSimulationOptions,
+  getBullyingSimulations,
+  processBullyingSimulation,
+} from "@/lib/api";
 
 const cameraFeeds = [
-  { id: "CAM-01", name: "Aula 5to A", location: "Bloque A", active: true, lastSignal: "En vivo" },
-  { id: "CAM-02", name: "Aula 6to B", location: "Bloque A", active: true, lastSignal: "En vivo" },
-  { id: "CAM-03", name: "Patio central", location: "Área común", active: false, lastSignal: "Sin señal" },
-  { id: "CAM-04", name: "Ingreso principal", location: "Portería", active: true, lastSignal: "En vivo" },
-  { id: "CAM-05", name: "Pasillo secundaria", location: "Bloque B", active: false, lastSignal: "Mantenimiento" },
-  { id: "CAM-06", name: "Biblioteca", location: "Bloque C", active: true, lastSignal: "En vivo" },
+  {
+    id: "CAM-01",
+    name: "Aula 5to A",
+    location: "Bloque A",
+    active: true,
+    lastSignal: "En vivo",
+    videoUrl: "https://www.youtube.com/embed/4_esxWiQwLM?autoplay=1&mute=1&controls=1&rel=0&vq=small&loop=1&playlist=4_esxWiQwLM",
+  },
+  {
+    id: "CAM-02",
+    name: "Aula 6to B",
+    location: "Bloque A",
+    active: true,
+    lastSignal: "En vivo",
+    videoUrl: "http://localhost:8787/media/bullying-videos/Video%202026-06-19%20AM.mp4",
+    videoName: "Video 2026-06-19 AM.mp4",
+    childId: 2,
+  },
+  {
+    id: "CAM-03",
+    name: "Aula 4to A",
+    location: "Bloque A",
+    active: true,
+    lastSignal: "En vivo",
+    videoUrl: "http://localhost:8787/media/bullying-videos/Video%202026-06-21%20AM.mp4",
+    videoName: "Video 2026-06-21 AM.mp4",
+    childId: 7,
+  },
+  {
+    id: "CAM-04",
+    name: "Aula 4to B",
+    location: "Bloque B",
+    active: true,
+    lastSignal: "En vivo",
+    videoUrl: "http://localhost:8787/media/bullying-videos/Video%202026-06-23%20AM.mp4",
+    videoName: "Video 2026-06-23 AM.mp4",
+    childId: 3,
+  },
+  {
+    id: "CAM-05",
+    name: "Aula 1ro A",
+    location: "Bloque B",
+    active: true,
+    lastSignal: "En vivo",
+    videoUrl: "http://localhost:8787/media/bullying-videos/Video%202026-60-20%20AM.mp4",
+    videoName: "Video 2026-60-20 AM.mp4",
+    childId: 4,
+  },
+  {
+    id: "CAM-06",
+    name: "Patio del colegio",
+    location: "Área común",
+    active: true,
+    lastSignal: "En vivo",
+    videoUrl: "https://www.youtube.com/embed/e4TWXJkOt4s?autoplay=1&mute=1&controls=1&rel=0&vq=small&loop=1&playlist=e4TWXJkOt4s",
+  },
 ];
 
 function normalizeError(error: unknown) {
@@ -42,8 +97,11 @@ function formatDateTime(value?: string | null) {
 export function CameraMonitoringShell() {
   const router = useRouter();
   const [reports, setReports] = useState<any[]>([]);
+  const [detectedVideoCount, setDetectedVideoCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [sendingCameraId, setSendingCameraId] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
 
   useEffect(() => {
     void loadReports();
@@ -56,8 +114,15 @@ export function CameraMonitoringShell() {
     setLoading(true);
     setErrorMessage("");
     try {
-      const response = await getBullyingSimulations({ result: "BULLYING_DETECTADO" });
-      setReports(Array.isArray(response.data) ? response.data : []);
+      const [reportsResponse, optionsResponse] = await Promise.all([
+        getBullyingSimulations({ result: "BULLYING_DETECTADO" }),
+        getBullyingSimulationOptions(),
+      ]);
+      setReports(Array.isArray(reportsResponse.data) ? reportsResponse.data : []);
+      const videos = Array.isArray(optionsResponse.data?.videos) ? optionsResponse.data.videos : [];
+      setDetectedVideoCount(
+        videos.filter((video: any) => video.expected_result === "BULLYING_DETECTADO").length,
+      );
     } catch (error) {
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
         clearSession();
@@ -67,6 +132,30 @@ export function CameraMonitoringShell() {
       setErrorMessage(normalizeError(error));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function sendCameraAlert(camera: any) {
+    if (!camera.childId || !camera.videoName) return;
+    setSendingCameraId(camera.id);
+    setErrorMessage("");
+    setSuccessMessage("");
+    try {
+      const response = await processBullyingSimulation({
+        child_id: camera.childId,
+        video_name: camera.videoName,
+      });
+      setSuccessMessage(`${camera.id}: ${response.message ?? "Alerta enviada correctamente."}`);
+      await loadReports();
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+        clearSession();
+        router.replace("/");
+        return;
+      }
+      setErrorMessage(normalizeError(error));
+    } finally {
+      setSendingCameraId("");
     }
   }
 
@@ -106,7 +195,7 @@ export function CameraMonitoringShell() {
             <p className="text-sm text-slate-500">Bullying registrado</p>
             <ShieldAlert className="h-5 w-5 text-sky" />
           </div>
-          <p className="mt-4 text-4xl font-bold text-slate-900">{reports.length}</p>
+          <p className="mt-4 text-4xl font-bold text-slate-900">{detectedVideoCount}</p>
         </article>
       </section>
 
@@ -130,15 +219,42 @@ export function CameraMonitoringShell() {
             </div>
 
             <div className="mt-6 rounded-2xl bg-white/70 p-5">
-              <div className="aspect-video rounded-2xl border border-dashed border-slate-300 bg-slate-900/90 p-4 text-white">
-                <div className="flex h-full flex-col justify-between">
-                  <span className="text-xs uppercase tracking-[0.2em] text-slate-300">Vista activa</span>
-                  <div>
-                    <p className="text-lg font-semibold">{camera.active ? "Transmitiendo en vivo" : "Cámara sin señal"}</p>
-                    <p className="mt-1 text-sm text-slate-300">{camera.lastSignal}</p>
+              {camera.active && camera.videoUrl ? (
+                <div className="overflow-hidden rounded-2xl bg-slate-900">
+                  {camera.videoUrl.includes("youtube.com") ? (
+                    <iframe
+                      className="aspect-video w-full"
+                      src={camera.videoUrl}
+                      title={`Vista activa de ${camera.name}`}
+                      loading="lazy"
+                      allow="autoplay; encrypted-media; picture-in-picture"
+                      allowFullScreen
+                    />
+                  ) : (
+                    <video
+                      className="aspect-video w-full object-cover"
+                      src={camera.videoUrl}
+                      title={`Vista activa de ${camera.name}`}
+                      autoPlay
+                      muted
+                      loop
+                      controls
+                      playsInline
+                      preload="metadata"
+                    />
+                  )}
+                </div>
+              ) : (
+                <div className="aspect-video rounded-2xl border border-dashed border-slate-300 bg-slate-900/90 p-4 text-white">
+                  <div className="flex h-full flex-col justify-between">
+                    <span className="text-xs uppercase tracking-[0.2em] text-slate-300">Vista activa</span>
+                    <div>
+                      <p className="text-lg font-semibold">{camera.active ? "Transmitiendo en vivo" : "Cámara sin señal"}</p>
+                      <p className="mt-1 text-sm text-slate-300">{camera.lastSignal}</p>
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
             </div>
 
             <div className="mt-4">
@@ -149,10 +265,27 @@ export function CameraMonitoringShell() {
               >
                 {camera.active ? "Funcionando" : "No funcionando"}
               </span>
+              {camera.childId && camera.videoName ? (
+                <button
+                  type="button"
+                  onClick={() => void sendCameraAlert(camera)}
+                  disabled={sendingCameraId !== ""}
+                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <ShieldAlert className="h-4 w-4" />
+                  {sendingCameraId === camera.id ? "Enviando alerta..." : "Enviar alerta push"}
+                </button>
+              ) : null}
             </div>
           </article>
         ))}
       </section>
+
+      {successMessage ? (
+        <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+          {successMessage}
+        </div>
+      ) : null}
 
       <section className="mt-8 rounded-[1.75rem] bg-white p-6 shadow-panel">
         <div className="flex items-center gap-2">

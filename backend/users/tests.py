@@ -7,6 +7,7 @@ from rest_framework.test import APIClient
 from datetime import date, datetime
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 from users.models import (
     AccessControlRecord,
@@ -17,8 +18,10 @@ from users.models import (
     GeographicLocation,
     GPSDevice,
     MonitoringAlert,
+    MobileAccountStatus,
     PickupRecord,
     Tutor,
+    TutorStatus,
     UserRole,
     Role,
     AccessControlRecordType,
@@ -344,6 +347,7 @@ class BullyingSimulationTests(TestCase):
             is_active=True,
         )
         self.regent_user.set_password(self.password)
+        self.regent_user.mobile_push_token = "regent-fcm-token"
         self.regent_user.save()
 
         self.admin_user = self.user_model.objects.create(
@@ -379,6 +383,31 @@ class BullyingSimulationTests(TestCase):
             centro_educativo=self.center,
             dispositivo_gps=self.device,
         )
+        self.tutor_user = self.user_model.objects.create(
+            email="tutor.sim@test.com",
+            username="tutor.sim@test.com",
+            nombre="Tutor Sim",
+            rol=UserRole.TUTOR,
+            is_active=True,
+            mobile_push_token="tutor-fcm-token",
+        )
+        self.tutor = Tutor.objects.create(
+            nombres="Tutor",
+            apellidos="Simulación",
+            correo_electronico="tutor.sim@test.com",
+            correo_acceso="tutor.sim@test.com",
+            telefono="70000999",
+            direccion="Zona Sim",
+            parentesco="Padre",
+            estado=TutorStatus.ACTIVO,
+            cuenta_movil_estado=MobileAccountStatus.ACTIVA,
+        )
+        ChildTutorAssociation.objects.create(
+            child=self.child,
+            tutor=self.tutor,
+            is_active=True,
+            created_by=self.admin_user,
+        )
         GeographicLocation.objects.create(
             device=self.device,
             child=self.child,
@@ -389,7 +418,13 @@ class BullyingSimulationTests(TestCase):
             device_timestamp=timezone.now(),
         )
 
-    def test_admin_can_process_bullying_video_and_generate_alert(self):
+    @patch("users.views.get_firebase_admin_app", return_value=object())
+    @patch("users.views.messaging.send", return_value="message-id")
+    def test_admin_can_process_bullying_video_and_notify_regent_and_tutor(
+        self,
+        send_mock,
+        _firebase_app_mock,
+    ):
         with tempfile.TemporaryDirectory() as temp_dir:
             video_path = Path(temp_dir) / "bullying_aula_01.mp4"
             video_path.write_bytes(b"fake video")
@@ -420,3 +455,6 @@ class BullyingSimulationTests(TestCase):
                 alert = MonitoringAlert.objects.first()
                 self.assertEqual(alert.alert_type, "BULLYING_DETECTADO")
                 self.assertEqual(response.data["data"]["generated_alert"]["alert_type"], "BULLYING_DETECTADO")
+                self.assertEqual(send_mock.call_count, 2)
+                sent_tokens = {call.args[0].token for call in send_mock.call_args_list}
+                self.assertEqual(sent_tokens, {"regent-fcm-token", "tutor-fcm-token"})

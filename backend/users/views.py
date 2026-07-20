@@ -972,18 +972,57 @@ def get_firebase_admin_app():
             return None
 
 
-def send_bullying_notification_to_regent(*, alert: MonitoringAlert):
-    if messaging is None:
-        return
+def get_bullying_notification_recipients(*, alert: MonitoringAlert):
     educational_center = alert.educational_center or alert.child.centro_educativo
+    recipients = []
+    seen_tokens = set()
+
     regent = educational_center.regent if educational_center else None
-    token = (regent.mobile_push_token or "").strip() if regent else ""
-    if not token:
-        return
+    if regent and regent.is_active and (regent.mobile_push_token or "").strip():
+        token = regent.mobile_push_token.strip()
+        seen_tokens.add(token)
+        recipients.append((regent, token))
+
+    tutor_emails = list(
+        ChildTutorAssociation.objects.filter(
+            child=alert.child,
+            is_active=True,
+            tutor__estado=TutorStatus.ACTIVO,
+            tutor__cuenta_movil_estado=MobileAccountStatus.ACTIVA,
+        )
+        .exclude(tutor__correo_acceso="")
+        .values_list("tutor__correo_acceso", flat=True)
+    )
+    tutor_email_filter = Q()
+    for email in tutor_emails:
+        tutor_email_filter |= Q(email__iexact=email)
+
+    if tutor_email_filter:
+        tutor_users = User.objects.filter(
+            tutor_email_filter,
+            rol=UserRole.TUTOR,
+            is_active=True,
+        ).exclude(mobile_push_token="")
+        for tutor_user in tutor_users:
+            token = (tutor_user.mobile_push_token or "").strip()
+            if token and token not in seen_tokens:
+                seen_tokens.add(token)
+                recipients.append((tutor_user, token))
+
+    return educational_center, recipients
+
+
+def send_bullying_push_notifications(*, alert: MonitoringAlert):
+    if messaging is None:
+        return 0
+
+    educational_center, recipients = get_bullying_notification_recipients(alert=alert)
+    if not recipients:
+        return 0
 
     app = get_firebase_admin_app()
     if app is None:
-        return
+        return 0
 
     classroom = ""
     if isinstance(alert.metadata, dict):
@@ -995,27 +1034,36 @@ def send_bullying_notification_to_regent(*, alert: MonitoringAlert):
         body_parts.append(classroom)
     body = " / ".join(body_parts)
 
-    try:
-        messaging.send(
-            messaging.Message(
-                token=token,
-                notification=messaging.Notification(
-                    title=title,
-                    body=body,
+    sent_count = 0
+    for recipient, token in recipients:
+        try:
+            messaging.send(
+                messaging.Message(
+                    token=token,
+                    notification=messaging.Notification(
+                        title=title,
+                        body=body,
+                    ),
+                    data={
+                        "type": "BULLYING_DETECTADO",
+                        "alert_id": str(alert.id),
+                        "child_id": str(alert.child_id),
+                        "educational_center_id": str(educational_center.id if educational_center else ""),
+                        "classroom": classroom,
+                        "recipient_role": recipient.rol,
+                    },
+                    android=messaging.AndroidConfig(priority="high"),
                 ),
-                data={
-                    "type": "BULLYING_DETECTADO",
-                    "alert_id": str(alert.id),
-                    "child_id": str(alert.child_id),
-                    "educational_center_id": str(educational_center.id if educational_center else ""),
-                    "classroom": classroom,
-                },
-                android=messaging.AndroidConfig(priority="high"),
-            ),
-            app=app,
-        )
-    except Exception:
-        logger.exception("No se pudo enviar push FCM al regente para alerta %s", alert.id)
+                app=app,
+            )
+            sent_count += 1
+        except Exception:
+            logger.exception(
+                "No se pudo enviar push FCM a %s para alerta %s",
+                recipient.email,
+                alert.id,
+            )
+    return sent_count
 
 
 def execute_bullying_simulation_analysis(*, child: Child, video_path: Path, user: User):
@@ -1084,7 +1132,7 @@ def execute_bullying_simulation_analysis(*, child: Child, video_path: Path, user
                 changed_by=user,
                 metadata={"simulation": True, "video_name": video_path.name},
             )
-            send_bullying_notification_to_regent(alert=generated_alert)
+        send_bullying_push_notifications(alert=generated_alert)
         if monitoring_history and monitoring_history.alert_id is None:
             monitoring_history.alert = generated_alert
             monitoring_history.save(update_fields=["alert"])
